@@ -182,7 +182,16 @@ public struct Packer: Sendable {
             group.addTask {
                 switch command {
                 case .bundle(let package, let target):
-                    try await packFile(srcName: "\(package)_\(target).bundle", into: resourceBundleDirectory(layout))
+                    let name = "\(package)_\(target).bundle"
+                    // SwiftPM's native build system makes no resource bundle
+                    // for C-family targets (swift-crypto's, whose only
+                    // resource is a privacy manifest), and such targets have
+                    // no Bundle.module accessor to look for one.
+                    if buildSettings.platform == .macOS,
+                       !FileManager.default.fileExists(atPath: URL(fileURLWithPath: name, relativeTo: binDir).path) {
+                        break
+                    }
+                    try await packFile(srcName: name, into: resourceBundleDirectory(layout))
                 case .binaryTarget(let name):
                     let src = URL(fileURLWithPath: "\(name).framework/\(name)", relativeTo: binDir)
                     let magic = Data("!<arch>\n".utf8)
