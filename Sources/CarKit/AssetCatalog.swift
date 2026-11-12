@@ -30,6 +30,11 @@ public struct AssetCatalog: Sendable {
         try addGroup(at: url, namespace: "")
     }
 
+    /// Adds an asset that does not come from a catalog, such as an app icon.
+    public mutating func add(_ asset: CarWriter.Asset) {
+        assets.append(asset)
+    }
+
     /// Compiles everything added so far.
     public func compile(deploymentTarget: String, platform: String) throws -> Data {
         var writer = CarWriter()

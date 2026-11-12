@@ -240,6 +240,11 @@ public struct Packer: Sendable {
             if let iconPath = product.iconPath {
                 let iconName = URL(fileURLWithPath: iconPath).deletingPathExtension().lastPathComponent
                 info["CFBundleIconFile"] = iconName
+                // The layered icon in Assets.car; CFBundleIconFile's .icns
+                // remains for systems that predate layered icons.
+                if let layered = Packer.layeredIconName(iconPath: iconPath, platform: product.platform) {
+                    info["CFBundleIconName"] = layered
+                }
             }
 
             let infoPath = layout.infoPlist
@@ -335,16 +340,29 @@ extension Packer {
     /// Replaces the asset catalog sources (`*.xcassets`) packed into the app,
     /// whether at its top level or inside a resource bundle, with a compiled
     /// `Assets.car` in the same directory, built by CarKit rather than
-    /// Apple's actool.
+    /// Apple's actool. On macOS, an Icon Composer app icon also goes into the
+    /// app's own catalog, as layers the system renders with its materials.
     func compileAssetCatalogs(in appURL: URL) async throws {
-        var catalogsByDirectory: [URL: [URL]] = [:]
+        // Keyed by standardized path, so the app's resources directory is one
+        // entry whether or not it also holds catalog sources.
+        var catalogsByDirectory: [String: [URL]] = [:]
         let enumerator = FileManager.default.enumerator(
             at: appURL, includingPropertiesForKeys: [.isDirectoryKey]
         )
         while let url = enumerator?.nextObject() as? URL {
             guard url.pathExtension == "xcassets" else { continue }
-            catalogsByDirectory[url.deletingLastPathComponent(), default: []].append(url)
+            catalogsByDirectory[url.deletingLastPathComponent().standardizedFileURL.path, default: []].append(url)
             enumerator?.skipDescendants()
+        }
+
+        var appIcon: (directory: String, asset: CarWriter.Asset)?
+        if let iconPath = plan.app.iconPath,
+           let name = Self.layeredIconName(iconPath: iconPath, platform: buildSettings.platform) {
+            let resources = BundleLayout(root: appURL, platform: buildSettings.platform)
+                .resources.standardizedFileURL.path
+            let icon = try IconComposerIcon(url: URL(fileURLWithPath: iconPath))
+            appIcon = (resources, .layeredIcon(try icon.layeredIcon(name: name)))
+            catalogsByDirectory[resources, default: []] += []
         }
 
         let (idioms, platformName, vectorScales) = switch buildSettings.platform {
@@ -353,23 +371,38 @@ extension Packer {
         }
         let resvg = catalogsByDirectory.isEmpty ? nil : try? await ToolRegistry.locate("resvg")
 
-        for (directory, catalogs) in catalogsByDirectory {
+        for (path, catalogs) in catalogsByDirectory {
+            let directory = URL(fileURLWithPath: path, isDirectory: true)
             var compiler = AssetCatalog(idioms: idioms)
             compiler.vectorScales = vectorScales
             compiler.renderSVG = resvg.map(Self.svgRenderer(resvg:))
             for catalog in catalogs.sorted(by: { $0.path < $1.path }) {
                 try compiler.add(catalogAt: catalog)
             }
+            if let appIcon, appIcon.directory == path {
+                compiler.add(appIcon.asset)
+            }
             for warning in compiler.warnings {
                 print("warning: asset catalog: \(warning)")
             }
             let car = try compiler.compile(deploymentTarget: plan.app.deploymentTarget, platform: platformName)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try car.write(to: directory.appendingPathComponent("Assets.car"))
             try ensureInfoPlist(forBundleContaining: directory)
             for catalog in catalogs {
                 try FileManager.default.removeItem(at: catalog)
             }
         }
+    }
+}
+
+extension Packer {
+    /// The asset catalog name of the app's layered icon, when it has one: an
+    /// Icon Composer icon on macOS. (iOS still gets a flat PNG.)
+    static func layeredIconName(iconPath: String, platform: Platform) -> String? {
+        let url = URL(fileURLWithPath: iconPath)
+        guard platform == .macOS, url.pathExtension == "icon" else { return nil }
+        return url.deletingPathExtension().lastPathComponent
     }
 }
 

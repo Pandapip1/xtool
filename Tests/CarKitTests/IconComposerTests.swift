@@ -51,3 +51,51 @@ struct IconComposerTests {
         #expect(icns.dropFirst(8).prefix(4) == Data("icp4".utf8))
     }
 }
+
+#if canImport(AppKit)
+import AppKit
+
+/// Layered icons are rendered by the system, so the check is what it draws.
+struct LayeredIconTests {
+    @Test func systemRendersLayeredIcon() throws {
+        // A blue background with an opaque white 400pt square, glass off.
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LayeredIconTests-\(UUID().uuidString).icon")
+        try FileManager.default.createDirectory(at: url.appendingPathComponent("Assets"), withIntermediateDirectories: true)
+        try Data(#"""
+        {"fill":{"solid":"srgb:0,0,1,1"},
+         "groups":[{"layers":[{"image-name":"Square.svg","glass":false}],"shadow":{"kind":"none","opacity":0}}]}
+        """#.utf8).write(to: url.appendingPathComponent("icon.json"))
+        try Data(##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400"><rect width="400" height="400" fill="#fff"/></svg>"##.utf8)
+            .write(to: url.appendingPathComponent("Assets/Square.svg"))
+
+        var writer = CarWriter()
+        writer.assets = [.layeredIcon(try IconComposerIcon(url: url).layeredIcon(name: "AppIcon"))]
+        writer.deploymentTarget = "26.0"
+
+        let app = FileManager.default.temporaryDirectory.appendingPathComponent("LayeredIconTests-\(UUID().uuidString).app")
+        try FileManager.default.createDirectory(at: app.appendingPathComponent("Contents/Resources"), withIntermediateDirectories: true)
+        try writer.serialize().write(to: app.appendingPathComponent("Contents/Resources/Assets.car"))
+        try PropertyListSerialization.data(fromPropertyList: [
+            "CFBundleIdentifier": "test.\(UUID().uuidString)", "CFBundleIconName": "AppIcon", "CFBundlePackageType": "APPL",
+        ], format: .xml, options: 0).write(to: app.appendingPathComponent("Contents/Info.plist"))
+
+        let icon = NSWorkspace.shared.icon(forFile: app.path)
+        let rep = try #require(NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: 256, pixelsHigh: 256, bitsPerSample: 8, samplesPerPixel: 4,
+            hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        icon.draw(in: NSRect(x: 0, y: 0, width: 256, height: 256))
+        NSGraphicsContext.restoreGraphicsState()
+
+        // The center is the white square; between it and the edge, the fill.
+        // (Under the default icon style; others restyle the fill.)
+        let center = try #require(rep.colorAt(x: 128, y: 128)?.usingColorSpace(.sRGB))
+        let side = try #require(rep.colorAt(x: 44, y: 128)?.usingColorSpace(.sRGB))
+        #expect(center.redComponent > 0.9 && center.blueComponent > 0.9, "\(center)")
+        #expect(side.blueComponent - side.redComponent > 0.2, "\(side)") // the material lightens the fill
+    }
+}
+#endif

@@ -26,11 +26,100 @@ public struct CarWriter: Sendable {
         case vector(name: String, svg: Data, bitmaps: [Bitmap])
         /// sRGB components, 0...1.
         case color(name: String, red: Double, green: Double, blue: Double, alpha: Double)
+        /// A layered app icon (from Icon Composer), which the system renders
+        /// itself, with its materials, for each appearance.
+        case layeredIcon(LayeredIcon)
 
         var name: String {
             switch self {
             case .image(let name, _), .vector(let name, _, _), .color(let name, _, _, _, _): name
+            case .layeredIcon(let icon): icon.name
             }
+        }
+    }
+
+    /// A layered icon: a background fill under groups of image layers, each
+    /// group drawn as one piece of material. Lists run bottom-most first.
+    public struct LayeredIcon: Sendable {
+        public struct Color: Sendable, Equatable {
+            /// CoreUI's color space numbers: 1 sRGB, 4 extended sRGB, 2 gray,
+            /// 6 extended gray.
+            public var space: UInt32
+            public var components: [Double]
+
+            public init(space: UInt32, components: [Double]) {
+                self.space = space
+                self.components = components
+            }
+
+            public static func sRGB(_ r: Double, _ g: Double, _ b: Double, _ a: Double = 1) -> Color {
+                Color(space: 4, components: [r, g, b, a])
+            }
+            public static func gray(_ white: Double, _ alpha: Double = 1) -> Color {
+                Color(space: 6, components: [white, alpha])
+            }
+        }
+
+        public enum Fill: Sendable {
+            case color(Color)
+            /// From `start` to `stop` in unit coordinates of the icon, y down.
+            case linearGradient(Color, Color, start: (x: Double, y: Double), stop: (x: Double, y: Double))
+        }
+
+        public enum Image: Sendable {
+            case svg(Data)
+            case bitmap(Bitmap)
+        }
+
+        public struct Layer: Sendable {
+            public var image: Image
+            /// Where the image is drawn on the 1024-point canvas, y down.
+            public var x: Int, y: Int, width: Int, height: Int
+            /// A `CGBlendMode` value (0 normal, 1 multiply, 2 screen, ...).
+            public var blendMode: UInt32 = 0
+            public var opacity: Double = 1
+            public var glass = false
+            /// Paints the image's shape in this color instead of its own.
+            public var fill: Color?
+
+            public init(image: Image, x: Int, y: Int, width: Int, height: Int) {
+                self.image = image
+                (self.x, self.y, self.width, self.height) = (x, y, width, height)
+            }
+        }
+
+        public struct Group: Sendable {
+            public enum Shadow: UInt32, Sendable {
+                case none = 0
+                case layerColor = 2
+                case neutral = 3
+            }
+
+            public var layers: [Layer]
+            public var opacity: Double = 1
+            /// Light the group's layers as one shape rather than each on its own.
+            public var combinedLighting = false
+            public var blur: Double = 0
+            public var specular = true
+            /// 0 when translucency is off.
+            public var translucency: Double = 0.3
+            public var shadow = Shadow.neutral
+            public var shadowOpacity: Double = 0.5
+
+            public init(layers: [Layer]) {
+                self.layers = layers
+            }
+        }
+
+        public var name: String
+        /// Nil leaves the default (white) background.
+        public var fill: Fill?
+        public var groups: [Group]
+
+        public init(name: String, fill: Fill?, groups: [Group]) {
+            self.name = name
+            self.fill = fill
+            self.groups = groups
         }
     }
 
@@ -48,8 +137,29 @@ public struct CarWriter: Sendable {
 
     enum Part: UInt16 {
         case vector = 42
+        /// Bitmaps, and the SVG images of layered icons.
         case bitmap = 181
         case color = 217
+        case layeredImage = 245
+        case layerGroup = 246
+        case gradient = 247
+    }
+
+    /// Values of the appearance attribute, named in the APPEARANCEKEYS table.
+    enum Appearance: UInt16, CaseIterable {
+        case system = 0
+        case dark = 1
+        case light = 8
+        case tintable = 10
+
+        var name: String {
+            switch self {
+            case .system: "NSAppearanceNameSystem"
+            case .dark: "NSAppearanceNameDarkAqua"
+            case .light: "NSAppearanceNameAqua"
+            case .tintable: "ISAppearanceTintable"
+            }
+        }
     }
 
     /// Fixed value of the `element` attribute in every key.
@@ -67,16 +177,31 @@ public struct CarWriter: Sendable {
 
     public func serialize() throws -> Data {
         // Names get small sequential identifiers; any unique u16 works.
-        let names = assets.map(\.name).sorted()
+        let names = assets.flatMap { asset in
+            if case .layeredIcon(let icon) = asset { return LayeredIconParts(icon).names }
+            return [asset.name]
+        }.sorted()
+        guard Set(names).count == names.count else {
+            throw CarError("asset names must be unique")
+        }
         let identifiers = Dictionary(uniqueKeysWithValues: names.enumerated().map { ($1, UInt16($0 + 1)) })
 
         var renditions: [(key: [UInt16], value: Data)] = []
         var facets: [(name: String, value: Data)] = []
         var bitmapKeys: [(identifier: UInt16, scales: Set<Int>)] = []
+        var usesAppearances = false
 
         for asset in assets {
             let identifier = identifiers[asset.name]!
             switch asset {
+            case .layeredIcon(let icon):
+                usesAppearances = true
+                let parts = LayeredIconParts(icon)
+                for named in try parts.renditions(writer: self, identifiers: identifiers) {
+                    renditions.append(contentsOf: named.renditions)
+                    facets.append((named.name, facet(part: named.part, identifier: identifiers[named.name]!)))
+                    bitmapKeys.append((identifiers[named.name]!, [1]))
+                }
             case .image(let name, let bitmaps):
                 for bitmap in bitmaps {
                     renditions.append((
@@ -131,12 +256,21 @@ public struct CarWriter: Sendable {
         bom.setVariable("BITMAPKEYS", block: bom.addTree(bitmapKeys.map { entry in
             (.inline(UInt32(entry.identifier)), bitmapKeyValue(scales: entry.scales))
         }, nodeSize: 1024, flag: 1))
+        if usesAppearances {
+            // Appearance names to the values keys use, sorted by name.
+            let appearances = Appearance.allCases.sorted { Array($0.name.utf8).lexicographicallyPrecedes(Array($1.name.utf8)) }
+            bom.setVariable("APPEARANCEKEYS", block: bom.addTree(appearances.map { appearance in
+                var value = Data()
+                value.appendLittleEndian(appearance.rawValue)
+                return (.block(Data(appearance.name.utf8)), value)
+            }))
+        }
         return bom.serialize()
     }
 
     // MARK: Tables
 
-    private func header(renditionCount: Int) -> Data {
+    func header(renditionCount: Int) -> Data {
         var data = Data("RATC".utf8)
         data.appendLittleEndian(UInt32(1011)) // CoreUI version
         data.appendLittleEndian(UInt32(17)) // storage version
@@ -152,7 +286,7 @@ public struct CarWriter: Sendable {
         return data
     }
 
-    private func keyFormat() -> Data {
+    func keyFormat() -> Data {
         var data = Data("tmfk".utf8)
         data.appendLittleEndian(UInt32(0))
         data.appendLittleEndian(UInt32(Attribute.allCases.count))
@@ -162,7 +296,7 @@ public struct CarWriter: Sendable {
         return data
     }
 
-    private func metadata() -> Data {
+    func metadata() -> Data {
         var strings = Data()
         for string in [deploymentTarget, platform, "xtool"] {
             strings.append(contentsOf: string.utf8)
@@ -171,19 +305,20 @@ public struct CarWriter: Sendable {
         return Data("META".utf8) + strings.padded(to: 1024)
     }
 
-    private func key(part: Part, identifier: UInt16, scale: Int) -> [UInt16] {
+    func key(part: Part, identifier: UInt16, scale: Int, appearance: Appearance = .system) -> [UInt16] {
         Attribute.allCases.map { attribute in
             switch attribute {
             case .element: Self.element
             case .part: part.rawValue
             case .identifier: identifier
             case .scale: UInt16(scale)
-            case .appearance, .localization, .size, .idiom: 0
+            case .appearance: appearance.rawValue
+            case .localization, .size, .idiom: 0
             }
         }
     }
 
-    private func facet(part: Part, identifier: UInt16) -> Data {
+    func facet(part: Part, identifier: UInt16) -> Data {
         var data = Data()
         data.appendLittleEndian(UInt16(0)) // hot spot x
         data.appendLittleEndian(UInt16(0)) // hot spot y
@@ -199,7 +334,7 @@ public struct CarWriter: Sendable {
     }
 
     /// One mask per key attribute: which values the name's renditions use.
-    private func bitmapKeyValue(scales: Set<Int>) -> Data {
+    func bitmapKeyValue(scales: Set<Int>) -> Data {
         var data = Data()
         for field: UInt32 in [1, 0, 36, UInt32(Attribute.allCases.count)] {
             data.appendLittleEndian(field)
@@ -217,7 +352,7 @@ public struct CarWriter: Sendable {
 
     // MARK: Renditions
 
-    private enum InfoType: UInt32 {
+    enum InfoType: UInt32 {
         case slices = 0x3e9
         case metrics = 0x3eb
         case composition = 0x3ec
@@ -225,7 +360,7 @@ public struct CarWriter: Sendable {
         case bytesPerRow = 0x3ef
     }
 
-    private func info(_ type: InfoType, _ fields: [UInt32]) -> Data {
+    func info(_ type: InfoType, _ fields: [UInt32]) -> Data {
         var data = Data()
         data.appendLittleEndian(type.rawValue)
         data.appendLittleEndian(UInt32(fields.count * 4))
@@ -233,7 +368,7 @@ public struct CarWriter: Sendable {
         return data
     }
 
-    private func rendition(
+    func rendition(
         name: String, flags: UInt32, width: Int, height: Int, scale: Int,
         pixelFormat: String, colorSpace: UInt32, layout: UInt16, info: Data, payload: Data
     ) -> Data {
@@ -256,7 +391,7 @@ public struct CarWriter: Sendable {
         return data + info + payload
     }
 
-    private func bitmapRendition(name: String, _ bitmap: Bitmap, fromVector: Bool = false) throws -> Data {
+    func bitmapRendition(name: String, _ bitmap: Bitmap, fromVector: Bool = false) throws -> Data {
         // colorSpace 1 is sRGB (0 would be Generic RGB).
         let bytesPerRow = bitmap.width * 4
         guard bitmap.pixels.count == bytesPerRow * bitmap.height else {
@@ -284,7 +419,7 @@ public struct CarWriter: Sendable {
         )
     }
 
-    private func vectorRendition(name: String, svg: Data) throws -> Data {
+    func vectorRendition(name: String, svg: Data) throws -> Data {
         var info = Data()
         info += self.info(.composition, [0, 0x3f80_0000])
         info += self.info(.uti, [1])
@@ -300,14 +435,14 @@ public struct CarWriter: Sendable {
         )
     }
 
-    private func colorRendition(name: String, components: [Double]) -> Data {
+    func colorRendition(name: String, components: [Double], space: UInt32 = 1) -> Data {
         var info = Data()
         info += self.info(.composition, [0, 0])
         info += self.info(.uti, [1])
 
         var payload = Data("RLOC".utf8) // 'COLR'
         payload.appendLittleEndian(UInt32(1)) // version
-        payload.appendLittleEndian(UInt32(1)) // color space: sRGB
+        payload.appendLittleEndian(space) // color space: 1 sRGB (see LayeredIcon.Color)
         payload.appendLittleEndian(UInt32(components.count))
         for component in components {
             payload.appendLittleEndian(component.bitPattern)
