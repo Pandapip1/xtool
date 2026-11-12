@@ -77,9 +77,8 @@ struct AssetCatalogTests {
         let image = try #require(bundle.image(forResource: "Swatch"))
         let cgImage = try #require(image.cgImage(forProposedRect: nil, context: nil, hints: nil))
         #expect(cgImage.width == 2 && cgImage.height == 1)
-        let decoded = try #require(cgImage.dataProvider?.data as Data?)
-        // premultiplied BGRA: red; then green at half alpha (255 * 128 / 255 = 128)
-        #expect(Array(decoded.prefix(8)) == [0, 0, 255, 255, 0, 128, 0, 128])
+        // red; then green at half alpha (255 * 128 / 255 = 128), premultiplied RGBA
+        #expect(rgbaPixels(of: cgImage) == [255, 0, 0, 255, 0, 128, 0, 128])
     }
 }
 #endif

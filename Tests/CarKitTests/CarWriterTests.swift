@@ -44,8 +44,8 @@ struct CarWriterTests {
         let cgImage = try #require(image.cgImage(forProposedRect: nil, context: nil, hints: nil))
         #expect(cgImage.width == 2 && cgImage.height == 1)
         #expect(cgImage.colorSpace?.name == CGColorSpace.sRGB)
-        let decoded = try #require(cgImage.dataProvider?.data as Data?)
-        #expect(Array(decoded.prefix(8)) == Array(pixels))
+        // blue, then red at half alpha, as premultiplied RGBA
+        #expect(rgbaPixels(of: cgImage) == [0, 0, 255, 255, 128, 0, 0, 128])
     }
 
     @Test func manyAssetsSpanSeveralTreeLeaves() throws {

@@ -83,7 +83,8 @@ them, one field at a time:
 
 - `CELM` compression 0: uncompressed, premultiplied BGRA rows (decoded as
   32-bit little-endian, alpha first). Compression 4: LZFSE of the same rows
-  (decoded to RGBA order). zlib, whether wrapped or raw deflate, is not
+  (decoded to RGBA order). CarKit writes LZFSE, using the vendored reference
+  implementation (Sources/CLzfse). zlib, whether wrapped or raw deflate, is not
   decoded under any type number tried (0–12).
 - `CELM` flags: bit 0 marks chunked data ("Can't find the correct chunk"
   when set on unchunked data); bit 1 makes the image opaque.

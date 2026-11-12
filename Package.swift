@@ -209,11 +209,16 @@ let package = Package(
             pkgConfig: "zlib",
             providers: [.apt(["zlib1g-dev"])]
         ),
+        // LZFSE reference implementation (BSD-3-Clause), vendored for CarKit
+        .target(
+            name: "CLzfse",
+            exclude: ["LICENSE", "README.md"]
+        ),
         // Writes compiled asset catalogs (Assets.car) without Apple's tools;
         // see Documentation/Formats/AssetCatalog.md
         .target(
             name: "CarKit",
-            dependencies: ["CZlib"],
+            dependencies: ["CZlib", "CLzfse"],
             swiftSettings: swiftSettings,
         ),
         .target(

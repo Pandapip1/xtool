@@ -51,9 +51,9 @@ public struct CarWriter: Sendable {
     /// Fixed value of the `element` attribute in every key.
     static let element: UInt16 = 85
 
-    /// Bitmap payload compression: 0 is uncompressed. (4 is LZFSE; zlib is
-    /// not decoded.) See the format notes.
-    static let compressionNone: UInt32 = 0
+    /// Bitmap payload compression. 0 is uncompressed, 4 is LZFSE; zlib is not
+    /// decoded at all. See the format notes.
+    static let compressionLZFSE: UInt32 = 4
 
     public var assets: [Asset] = []
     public var deploymentTarget = "11.0"
@@ -255,9 +255,10 @@ public struct CarWriter: Sendable {
 
         var payload = Data("MLEC".utf8) // 'CELM'
         payload.appendLittleEndian(UInt32(0)) // flags (bit 0: chunked)
-        payload.appendLittleEndian(Self.compressionNone)
-        payload.appendLittleEndian(UInt32(bitmap.pixels.count))
-        payload += bitmap.pixels
+        let compressed = try LZFSE.compress(bitmap.pixels)
+        payload.appendLittleEndian(Self.compressionLZFSE)
+        payload.appendLittleEndian(UInt32(compressed.count))
+        payload += compressed
 
         return rendition(
             name: name, flags: 0x10, width: bitmap.width, height: bitmap.height, scale: bitmap.scale,
