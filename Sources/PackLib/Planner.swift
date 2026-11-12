@@ -23,6 +23,8 @@ public struct Planner: Sendable {
     // anything older than this requires bundling the stdlib which
     // is doable but probably not worth the effort
     private static let minSupportedIOSVersion = "13.0"
+    // the first macOS with the Swift runtime built in
+    private static let minSupportedMacOSVersion = "10.15"
 
     private func buildGraph() async throws -> PackageGraph {
         let dependencyRoot = try await dumpDependencies()
@@ -164,15 +166,15 @@ public struct Planner: Sendable {
         }
 
         let bundleID = idSpecifier.formBundleID(product: library.name)
-        let deploymentTarget = graph.root.platforms?.first { $0.name == "ios" }?.version
-            ?? Self.minSupportedIOSVersion
+        let platform = buildSettings.platform
+        let deploymentTarget = graph.root.platforms?.first { $0.name == platform.packageName }?.version
+            ?? (platform == .macOS ? Self.minSupportedMacOSVersion : Self.minSupportedIOSVersion)
 
         var infoPlist: [String: Sendable] = [
             "CFBundleInfoDictionaryVersion": "6.0",
             "CFBundleDevelopmentRegion": "en",
             "CFBundleVersion": "1",
             "CFBundleShortVersionString": "1.0.0",
-            "MinimumOSVersion": deploymentTarget,
             "CFBundleIdentifier": bundleID,
             "CFBundleName": library.name,
             "CFBundleExecutable": library.name,
@@ -180,8 +182,16 @@ public struct Planner: Sendable {
             "CFBundlePackageType": type.fourCharCode,
         ]
 
-        switch type {
-        case .application:
+        switch (platform, type) {
+        case (.macOS, .application):
+            infoPlist["LSMinimumSystemVersion"] = deploymentTarget
+            infoPlist["NSPrincipalClass"] = "NSApplication"
+            infoPlist["NSHighResolutionCapable"] = true
+        case (.macOS, .appExtension):
+            infoPlist["LSMinimumSystemVersion"] = deploymentTarget
+            infoPlist["NSExtension"] = [:] as [String: Sendable]
+        case (.iOS, .application):
+            infoPlist["MinimumOSVersion"] = deploymentTarget
             infoPlist["UIDeviceFamily"] = [1, 2]
             infoPlist["UISupportedInterfaceOrientations"] = ["UIInterfaceOrientationPortrait"]
             infoPlist["UISupportedInterfaceOrientations~ipad"] = [
@@ -191,7 +201,8 @@ public struct Planner: Sendable {
                 "UIInterfaceOrientationLandscapeRight",
             ]
             infoPlist["UILaunchScreen"] = [:] as [String: Sendable]
-        case .appExtension:
+        case (.iOS, .appExtension):
+            infoPlist["MinimumOSVersion"] = deploymentTarget
             // Should set default parameters?
             infoPlist["NSExtension"] = [:] as [String: Sendable]
         }
@@ -208,6 +219,7 @@ public struct Planner: Sendable {
 
         return Plan.Product(
             type: type,
+            platform: platform,
             product: library.name,
             deploymentTarget: deploymentTarget,
             bundleID: bundleID,
@@ -312,6 +324,7 @@ public struct Plan: Sendable {
 
     public struct Product: Sendable {
         public var type: ProductType
+        public var platform: Platform
         public var product: String
         public var deploymentTarget: String
         public var bundleID: String
@@ -324,16 +337,29 @@ public struct Plan: Sendable {
             "\(self.product)-\(self.type.targetSuffix)"
         }
 
+        /// The bundle directory of this product (the .app itself, or an
+        /// .appex inside the app's PlugIns).
         public func directory(inApp baseDir: URL) -> URL {
+            layout(inApp: baseDir).root
+        }
+
+        public func layout(inApp baseDir: URL) -> BundleLayout {
+            // ("." keeps the URL identical to what callers such as the
+            // entitlements mapping in the signer have always been given)
+            let app = BundleLayout(
+                root: baseDir.appendingPathComponent(".", isDirectory: true),
+                platform: platform
+            )
             switch type {
             case .application:
-                baseDir
-                    .appendingPathComponent(".", isDirectory: true)
+                return app
             case .appExtension:
-                baseDir
-                    .appendingPathComponent("PlugIns", isDirectory: true)
-                    .appendingPathComponent(product, isDirectory: true)
-                    .appendingPathExtension("appex")
+                return BundleLayout(
+                    root: app.plugIns
+                        .appendingPathComponent(product, isDirectory: true)
+                        .appendingPathExtension("appex"),
+                    platform: platform
+                )
             }
         }
     }

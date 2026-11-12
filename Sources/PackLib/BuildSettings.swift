@@ -29,6 +29,11 @@ public struct BuildSettings: Sendable {
         configOptions + sdkOptions + customOptions
     }
 
+    /// The platform the app is being built for.
+    public var platform: Platform {
+        Platform(triple: triple)
+    }
+
     public init(
         configuration: BuildConfiguration,
         triple: String,
@@ -42,12 +47,23 @@ public struct BuildSettings: Sendable {
         self.triple = triple
         self.buildSystem = if let buildSystem { buildSystem } else { try await .default() }
 
-        self.sdkEnvironment = [
+        #if os(macOS)
+        // Building for the Mac on a Mac is a native build: the host SDK is the
+        // right one, and SDKROOT is how a non-Xcode toolchain is pointed at it.
+        let nativeMacBuild = Platform(triple: triple) == .macOS
+        #else
+        let nativeMacBuild = false
+        #endif
+
+        self.sdkEnvironment = nativeMacBuild ? [:] : [
             // xcrun passes an SDKROOT that messes with our sdk configuration
             "SDKROOT": nil,
         ]
 
         switch self.buildSystem {
+        case .swiftPM where nativeMacBuild:
+            // No separate Swift SDK to select.
+            self.sdkOptions = ["--triple", triple]
         case .swiftPM:
             // on macOS we don't explicitly install a Swift SDK but
             // SwiftPM vends "implicit" Darwin SDKs as of Swift 6.1,

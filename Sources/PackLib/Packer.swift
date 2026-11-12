@@ -31,7 +31,7 @@ public struct Packer: Sendable {
         let package = Package(
             name: "\(plan.app.product)-Builder",
             platforms: [
-                .iOS("\(plan.app.deploymentTarget)"),
+                \(plan.app.platform.packageDescription(version: plan.app.deploymentTarget)),
             ],
             dependencies: [
                 .package(name: "RootPackage", path: "../.."),
@@ -97,8 +97,16 @@ public struct Packer: Sendable {
         case .swiftPM:
             binPath = "\(buildSettings.triple)/\(buildSettings.configuration.rawValue)"
         case .swiftBuild:
-            let platformName = buildSettings.triple.contains("simulator") ? "iphonesimulator" : "iphoneos"
-            binPath = "out/Products/\(buildSettings.configuration.swiftBuildValue)-\(platformName)"
+            let configuration = buildSettings.configuration.swiftBuildValue
+            switch buildSettings.platform {
+            case .macOS:
+                // like Xcode, Swift Build puts macOS products in an
+                // unsuffixed directory
+                binPath = "out/Products/\(configuration)"
+            case .iOS:
+                let platformName = buildSettings.triple.contains("simulator") ? "iphonesimulator" : "iphoneos"
+                binPath = "out/Products/\(configuration)-\(platformName)"
+            }
         }
         let binDir = URL(
             fileURLWithPath: ".build/\(binPath)",
@@ -110,7 +118,7 @@ public struct Packer: Sendable {
                 try pack(
                     product: product,
                     binDir: binDir,
-                    outputURL: product.directory(inApp: outputURL),
+                    layout: product.layout(inApp: outputURL),
                     &group
                 )
             }
@@ -136,20 +144,28 @@ public struct Packer: Sendable {
     @Sendable private func pack(
         product: Plan.Product,
         binDir: URL,
-        outputURL: URL,
+        layout: BundleLayout,
         _ group: inout ThrowingTaskGroup<Void, Error>
     ) throws {
-        @Sendable func packFileToRoot(srcName: String) async throws {
+        /// Copies a file from the package root into the bundle's resources.
+        @Sendable func packFileToResources(srcName: String) async throws {
             let srcURL = URL(fileURLWithPath: srcName)
-            let destURL = outputURL.appendingPathComponent(srcURL.lastPathComponent)
+            let destURL = layout.resources.appendingPathComponent(srcURL.lastPathComponent)
+            try? FileManager.default.createDirectory(at: layout.resources, withIntermediateDirectories: true)
             try FileManager.default.copyItem(at: srcURL, to: destURL)
 
             try Task.checkCancellation()
         }
 
-        @Sendable func packFile(srcName: String, dstName: String? = nil, sign: Bool = false) async throws {
+        /// Copies a build product into `directory` (in the bundle), optionally renamed.
+        @Sendable func packFile(
+            srcName: String,
+            into directory: URL,
+            dstName: String? = nil,
+            sign: Bool = false
+        ) async throws {
             let srcURL = URL(fileURLWithPath: srcName, relativeTo: binDir)
-            let dstURL = URL(fileURLWithPath: dstName ?? srcURL.lastPathComponent, relativeTo: outputURL)
+            let dstURL = directory.appendingPathComponent(dstName ?? srcURL.lastPathComponent)
             try? FileManager.default.createDirectory(at: dstURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             try FileManager.default.copyItem(at: srcURL, to: dstURL)
 
@@ -157,13 +173,15 @@ public struct Packer: Sendable {
         }
 
         // Ensure output directory is available
-        try? FileManager.default.createDirectory(at: outputURL, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: layout.contents, withIntermediateDirectories: true)
 
         for command in product.resources {
             group.addTask {
                 switch command {
                 case .bundle(let package, let target):
-                    try await packFile(srcName: "\(package)_\(target).bundle")
+                    // SwiftPM's resource accessor looks in the main bundle's
+                    // resources directory (the bundle root on iOS).
+                    try await packFile(srcName: "\(package)_\(target).bundle", into: layout.resources)
                 case .binaryTarget(let name):
                     let src = URL(fileURLWithPath: "\(name).framework/\(name)", relativeTo: binDir)
                     let magic = Data("!<arch>\n".utf8)
@@ -177,29 +195,31 @@ public struct Packer: Sendable {
                     // https://github.com/apple/llvm-project/blob/e716ff14c46490d2da6b240806c04e2beef01f40/llvm/include/llvm/Object/Archive.h#L33
                     // swiftlint:disable:previous line_length
                     if bytes != magic && bytes != thinMagic {
-                        try await packFile(srcName: "\(name).framework", dstName: "Frameworks/\(name).framework", sign: true)
+                        try await packFile(srcName: "\(name).framework", into: layout.frameworks, sign: true)
                     }
                 case .library(let name):
-                    try await packFile(srcName: "lib\(name).dylib", dstName: "Frameworks/lib\(name).dylib", sign: true)
+                    try await packFile(srcName: "lib\(name).dylib", into: layout.frameworks, sign: true)
                 case .root(let source):
-                    try await packFileToRoot(srcName: source)
+                    try await packFileToResources(srcName: source)
                 }
             }
         }
         if let iconPath = product.iconPath {
             group.addTask {
-                try await packFileToRoot(srcName: iconPath)
+                try await packFileToResources(srcName: iconPath)
             }
         }
         group.addTask {
-            try await packFile(srcName: product.targetName, dstName: product.product)
+            try await packFile(srcName: product.targetName, into: layout.executables, dstName: product.product)
         }
         group.addTask {
             var info = product.infoPlist
 
             if product.type == .application {
-                info["UIRequiredDeviceCapabilities"] = ["arm64"]
-                info["LSRequiresIPhoneOS"] = true
+                if product.platform == .iOS {
+                    info["UIRequiredDeviceCapabilities"] = ["arm64"]
+                    info["LSRequiresIPhoneOS"] = true
+                }
                 info["CFBundleSupportedPlatforms"] = Packer.cfBundleSupportedPlatforms(for: buildSettings.triple)
             }
 
@@ -208,7 +228,7 @@ public struct Packer: Sendable {
                 info["CFBundleIconFile"] = iconName
             }
 
-            let infoPath = outputURL.appendingPathComponent("Info.plist")
+            let infoPath = layout.infoPlist
             let encodedPlist = try PropertyListSerialization.data(
                 fromPropertyList: info,
                 format: .xml,
@@ -240,12 +260,27 @@ public struct Packer: Sendable {
 }
 
 extension Plan.Product {
+    /// Where this product's executable finds its own Frameworks directory,
+    /// and (for an extension) the host app's.
+    private var frameworkSearchPaths: (own: String, host: String) {
+        switch platform {
+        case .iOS:
+            // App.app/Frameworks; App.app/PlugIns/Ext.appex/Frameworks
+            ("@executable_path/Frameworks", "@executable_path/../../Frameworks")
+        case .macOS:
+            // App.app/Contents/{MacOS,Frameworks};
+            // App.app/Contents/PlugIns/Ext.appex/Contents/{MacOS,Frameworks}
+            ("@executable_path/../Frameworks", "@executable_path/../../../../Frameworks")
+        }
+    }
+
     fileprivate var linkerSettings: String {
-        switch self.type {
+        let paths = frameworkSearchPaths
+        return switch self.type {
         case .application: """
         [
             .unsafeFlags([
-                "-Xlinker", "-rpath", "-Xlinker", "@executable_path/Frameworks",
+                "-Xlinker", "-rpath", "-Xlinker", "\(paths.own)",
             ]),
         ]
         """
@@ -257,9 +292,9 @@ extension Plan.Product {
                 // Set the entry point to Foundation`_NSExtensionMain
                 "-Xlinker", "-e", "-Xlinker", "_NSExtensionMain",
                 // Include frameworks that the host app may use
-                "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../../Frameworks",
+                "-Xlinker", "-rpath", "-Xlinker", "\(paths.host)",
                 // ...as well as our own
-                "-Xlinker", "-rpath", "-Xlinker", "@executable_path/Frameworks",
+                "-Xlinker", "-rpath", "-Xlinker", "\(paths.own)",
             ]),
         ]
         """

@@ -140,9 +140,24 @@ struct DevBuildCommand: AsyncParsableCommand {
     @Option(
         help: ArgumentHelp(
             "Custom target triple to build for",
-            discussion: "Defaults to '\(PackOperation.defaultTriple)'"
+            discussion: """
+            Defaults to '\(PackOperation.defaultTriple)'. \
+            Use e.g. 'arm64-apple-macosx' to build a Mac app.
+            """
         )
     ) var triple: String?
+
+    func validate() throws {
+        if Platform(triple: triple ?? PackOperation.defaultTriple) == .macOS {
+            if sign {
+                // --sign provisions through a developer account for iOS devices.
+                throw ValidationError("--sign isn't supported for Mac apps yet")
+            }
+            if ipa {
+                throw ValidationError("--ipa is only for iOS apps")
+            }
+        }
+    }
 
     func run() async throws {
         let signingAuthToken: AuthToken?
@@ -208,7 +223,8 @@ struct DevRunCommand: AsyncParsableCommand {
         commandName: "run",
         abstract: "Build and run app with SwiftPM",
         discussion: """
-        This command deploys the SwiftPM-based iOS app in the current directory
+        This command deploys the SwiftPM-based iOS app in the current directory, \
+        or with --macos builds it as a Mac app and opens it.
         """
     )
 
@@ -220,17 +236,32 @@ struct DevRunCommand: AsyncParsableCommand {
         help: "Target the iOS Simulator"
     ) var simulator = false
 
+    @Flag(
+        name: .long,
+        help: "Build a Mac app and open it"
+    ) var macos = false
+
     var triple: String? {
+        #if arch(arm64)
+        let arch = "arm64"
+        #elseif arch(x86_64)
+        let arch = "x86_64"
+        #else
+        #error("Unsupported architecture")
+        #endif
+        if macos {
+            return "\(arch)-apple-macosx"
+        }
         if simulator {
-            #if arch(arm64)
-            return "arm64-apple-ios-simulator"
-            #elseif arch(x86_64)
-            return "x86_64-apple-ios-simulator"
-            #else
-            #error("Unsupported architecture")
-            #endif
+            return "\(arch)-apple-ios-simulator"
         }
         return nil
+    }
+
+    func validate() throws {
+        if macos && simulator {
+            throw ValidationError("--macos and --simulator can't be used together")
+        }
     }
     #else
     var triple: String? { nil }
@@ -240,6 +271,13 @@ struct DevRunCommand: AsyncParsableCommand {
 
     func run() async throws {
         let output = try await PackOperation(triple: triple, buildOptions: packOptions).run()
+
+        #if os(macOS)
+        if macos {
+            try await MacOpenOperation(path: output).run()
+            return
+        }
+        #endif
 
         #if os(macOS)
         if simulator {
@@ -310,6 +348,21 @@ struct SimInstallOperation {
         )
         .checkSuccess()
         d.out.print("Installed to simulator")
+    }
+}
+
+/// Launches a built Mac app with LaunchServices.
+struct MacOpenOperation {
+    var path: URL
+
+    func run() async throws {
+        try await Subprocess.run(
+            .path("/usr/bin/open"),
+            arguments: [path.path],
+            output: .discarded
+        )
+        .checkSuccess()
+        d.out.print("Opened \(path.lastPathComponent)")
     }
 }
 #endif
