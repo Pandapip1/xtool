@@ -102,9 +102,17 @@ them, one field at a time:
 Established by compiling single-setting variants of an `.icon` with actool,
 reading the output with the tools above, and comparing how the system draws
 the icon (`NSWorkspace.icon(forFile:)` on an app whose `CFBundleIconName`
-names it) against the same `.icon` compiled by CarKit. That comparison holds
-in every icon style (default, dark, clear and tinted, light and dark), down
-to the renderer's own run-to-run noise. No `.icns` is needed for it.
+names it) against the same `.icon` compiled by CarKit. Once the system has
+rendered an icon, later renders of it are identical to each other, and those
+match exactly, in every icon style (default, dark, clear and tinted, light
+and dark). The first render of a catalog the system has not seen differs
+slightly from later ones (a level or two at edges), whoever wrote it, so
+comparisons skip it. No `.icns` is needed for any of this.
+
+actool's own output is not byte-for-byte reproducible: its flattened bitmap
+renditions are named with a random UUID, process ID and timestamp, and the
+icon's facet points at part 220 in some runs and 245 in others. The layered
+renditions are the same every run.
 
 Appearances are a key attribute (7), named in an `APPEARANCEKEYS` tree (an
 ordinary tree like `FACETKEYS`: name to little-endian u16):
