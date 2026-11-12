@@ -136,7 +136,7 @@ public struct Packer: Sendable {
             }
         }
 
-        try compileAssetCatalogs(in: outputURL)
+        try await compileAssetCatalogs(in: outputURL)
 
         let dest = URL(fileURLWithPath: "xtool").appendingPathComponent(outputURL.lastPathComponent)
         try? FileManager.default.removeItem(at: dest)
@@ -323,7 +323,7 @@ extension Packer {
     /// whether at its top level or inside a resource bundle, with a compiled
     /// `Assets.car` in the same directory, built by CarKit rather than
     /// Apple's actool.
-    func compileAssetCatalogs(in appURL: URL) throws {
+    func compileAssetCatalogs(in appURL: URL) async throws {
         var catalogsByDirectory: [URL: [URL]] = [:]
         let enumerator = FileManager.default.enumerator(
             at: appURL, includingPropertiesForKeys: [.isDirectoryKey]
@@ -334,13 +334,16 @@ extension Packer {
             enumerator?.skipDescendants()
         }
 
-        let (idioms, platformName) = switch buildSettings.platform {
-        case .macOS: (["mac"], "macosx")
-        case .iOS: (["iphone", "ipad"], buildSettings.triple.contains("simulator") ? "iphonesimulator" : "iphoneos")
+        let (idioms, platformName, vectorScales) = switch buildSettings.platform {
+        case .macOS: (["mac"], "macosx", [1, 2])
+        case .iOS: (["iphone", "ipad"], buildSettings.triple.contains("simulator") ? "iphonesimulator" : "iphoneos", [2, 3])
         }
+        let resvg = catalogsByDirectory.isEmpty ? nil : try? await ToolRegistry.locate("resvg")
 
         for (directory, catalogs) in catalogsByDirectory {
             var compiler = AssetCatalog(idioms: idioms)
+            compiler.vectorScales = vectorScales
+            compiler.renderSVG = resvg.map(Self.svgRenderer(resvg:))
             for catalog in catalogs.sorted(by: { $0.path < $1.path }) {
                 try compiler.add(catalogAt: catalog)
             }
@@ -377,5 +380,25 @@ extension Packer {
         ]
         try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
             .write(to: infoPlist)
+    }
+}
+
+extension Packer {
+    /// Renders SVGs for asset catalogs with resvg (https://github.com/linebender/resvg).
+    fileprivate static func svgRenderer(resvg: URL) -> AssetCatalog.SVGRenderer {
+        { svg, scale in
+            let output = FileManager.default.temporaryDirectory
+                .appendingPathComponent("xtool-svg-\(UUID().uuidString).png")
+            defer { try? FileManager.default.removeItem(at: output) }
+            let process = Process()
+            process.executableURL = resvg
+            process.arguments = ["--zoom", "\(scale)", svg.path, output.path]
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                throw StringError("resvg failed to render \(svg.lastPathComponent)")
+            }
+            return try Data(contentsOf: output)
+        }
     }
 }

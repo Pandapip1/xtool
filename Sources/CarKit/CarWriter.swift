@@ -21,12 +21,15 @@ public struct CarWriter: Sendable {
 
     public enum Asset: Sendable {
         case image(name: String, bitmaps: [Bitmap])
+        /// An SVG, kept as vector data, plus bitmaps rendered from it for the
+        /// sizes and scales that use them.
+        case vector(name: String, svg: Data, bitmaps: [Bitmap])
         /// sRGB components, 0...1.
         case color(name: String, red: Double, green: Double, blue: Double, alpha: Double)
 
         var name: String {
             switch self {
-            case .image(let name, _), .color(let name, _, _, _, _): name
+            case .image(let name, _), .vector(let name, _, _), .color(let name, _, _, _, _): name
             }
         }
     }
@@ -44,6 +47,7 @@ public struct CarWriter: Sendable {
     }
 
     enum Part: UInt16 {
+        case vector = 42
         case bitmap = 181
         case color = 217
     }
@@ -78,6 +82,19 @@ public struct CarWriter: Sendable {
                     renditions.append((
                         key(part: .bitmap, identifier: identifier, scale: bitmap.scale),
                         try bitmapRendition(name: name, bitmap)
+                    ))
+                }
+                facets.append((name, facet(part: .bitmap, identifier: identifier)))
+                bitmapKeys.append((identifier, Set(bitmaps.map(\.scale))))
+            case .vector(let name, let svg, let bitmaps):
+                renditions.append((
+                    key(part: .vector, identifier: identifier, scale: 1),
+                    try vectorRendition(name: name, svg: svg)
+                ))
+                for bitmap in bitmaps {
+                    renditions.append((
+                        key(part: .bitmap, identifier: identifier, scale: bitmap.scale),
+                        try bitmapRendition(name: name, bitmap, fromVector: true)
                     ))
                 }
                 facets.append((name, facet(part: .bitmap, identifier: identifier)))
@@ -239,7 +256,7 @@ public struct CarWriter: Sendable {
         return data + info + payload
     }
 
-    private func bitmapRendition(name: String, _ bitmap: Bitmap) throws -> Data {
+    private func bitmapRendition(name: String, _ bitmap: Bitmap, fromVector: Bool = false) throws -> Data {
         // colorSpace 1 is sRGB (0 would be Generic RGB).
         let bytesPerRow = bitmap.width * 4
         guard bitmap.pixels.count == bytesPerRow * bitmap.height else {
@@ -261,8 +278,25 @@ public struct CarWriter: Sendable {
         payload += compressed
 
         return rendition(
-            name: name, flags: 0x10, width: bitmap.width, height: bitmap.height, scale: bitmap.scale,
+            // bitmaps rendered from a vector carry flags 0x114 rather than 0x10
+            name: name, flags: fromVector ? 0x114 : 0x10, width: bitmap.width, height: bitmap.height, scale: bitmap.scale,
             pixelFormat: "ARGB", colorSpace: 1, layout: 0xc, info: info, payload: payload
+        )
+    }
+
+    private func vectorRendition(name: String, svg: Data) throws -> Data {
+        var info = Data()
+        info += self.info(.composition, [0, 0x3f80_0000])
+        info += self.info(.uti, [1])
+
+        let compressed = try LZFSE.compress(svg)
+        var payload = Data("DWAR".utf8) // 'RAWD'
+        payload.appendLittleEndian(UInt32(1)) // version
+        payload.appendLittleEndian(UInt32(compressed.count))
+        payload += compressed
+        return rendition(
+            name: name, flags: 4, width: 0, height: 0, scale: 0,
+            pixelFormat: "SVG ", colorSpace: 0, layout: 9, info: info, payload: payload
         )
     }
 

@@ -3,8 +3,9 @@ import Foundation
 /// Reads asset catalog sources (`.xcassets` directories) and compiles them
 /// into `Assets.car` data with CarWriter.
 ///
-/// Supported so far: color sets and PNG image sets, for the `universal` (or
-/// platform) idiom and the default appearance. Anything else is reported
+/// Supported so far: color sets and image sets of PNG or SVG files (SVGs need
+/// `renderSVG`), for the `universal` (or platform) idiom and the default
+/// appearance. Anything else is reported
 /// through `warnings` and left out.
 public struct AssetCatalog: Sendable {
     public private(set) var assets: [CarWriter.Asset] = []
@@ -12,6 +13,13 @@ public struct AssetCatalog: Sendable {
 
     /// Idioms to use, most specific first; `universal` always applies.
     public var idioms: [String]
+
+    /// Renders an SVG file to PNG data at a scale (1 is its own size). SVG
+    /// images are skipped, with a warning, when there is none.
+    public typealias SVGRenderer = @Sendable (_ svg: URL, _ scale: Int) throws -> Data
+    public var renderSVG: SVGRenderer?
+    /// The scales bitmaps are rendered at for SVG images.
+    public var vectorScales = [1, 2]
 
     public init(idioms: [String] = ["universal"]) {
         self.idioms = idioms
@@ -152,6 +160,7 @@ public struct AssetCatalog: Sendable {
     private mutating func addImageSet(at url: URL, name: String) throws {
         let contents = try Contents.load(from: url)
         var bitmaps: [CarWriter.Bitmap] = []
+        var svg: (url: URL, data: Data)?
         for entry in select(contents.images ?? [], idiom: \.idiom, appearances: \.appearances) {
             guard let filename = entry.filename else { continue }
             let scale = entry.scale.flatMap { Int($0.dropLast()) } ?? 1
@@ -160,11 +169,24 @@ public struct AssetCatalog: Sendable {
             case "png":
                 let image = try PNGDecoder.decode(Data(contentsOf: file))
                 bitmaps.append(.init(scale: scale, width: image.width, height: image.height, pixels: image.pixels))
+            case "svg":
+                svg = (file, try Data(contentsOf: file))
             default:
                 warnings.append("\(name): \(file.pathExtension) images are not supported yet")
             }
         }
-        if bitmaps.isEmpty {
+        if let svg {
+            guard let renderSVG else {
+                warnings.append("\(name): SVG images need an SVG renderer (resvg)")
+                return
+            }
+            // The vector data, plus bitmaps for the platform's scales.
+            let rendered = try vectorScales.map { scale in
+                let image = try PNGDecoder.decode(renderSVG(svg.url, scale))
+                return CarWriter.Bitmap(scale: scale, width: image.width, height: image.height, pixels: image.pixels)
+            }
+            assets.append(.vector(name: name, svg: svg.data, bitmaps: rendered))
+        } else if bitmaps.isEmpty {
             warnings.append("\(name): no usable images")
         } else {
             assets.append(.image(name: name, bitmaps: bitmaps))

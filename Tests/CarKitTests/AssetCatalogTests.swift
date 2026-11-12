@@ -80,5 +80,50 @@ struct AssetCatalogTests {
         // red; then green at half alpha (255 * 128 / 255 = 128), premultiplied RGBA
         #expect(rgbaPixels(of: cgImage) == [255, 0, 0, 255, 0, 128, 0, 128])
     }
+
+    @Test func svgImageSet() throws {
+        try write("""
+        <svg xmlns="http://www.w3.org/2000/svg" width="4" height="4" viewBox="0 0 4 4">
+          <rect width="4" height="4" fill="#00ff00"/>
+        </svg>
+        """, to: "Assets.xcassets/Leaf.imageset/leaf.svg")
+        try write("""
+        {"images":[{"idiom":"universal","filename":"leaf.svg"}],
+         "properties":{"preserves-vector-representation":true}}
+        """, to: "Assets.xcassets/Leaf.imageset/Contents.json")
+
+        var compiler = AssetCatalog(idioms: ["mac"])
+        // AppKit reads SVG (macOS 14+), so the test needs no resvg.
+        compiler.renderSVG = { svg, scale in
+            let image = try #require(NSImage(contentsOf: svg))
+            let size = Int(image.size.width) * scale
+            let rep = try #require(NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: size, pixelsHigh: size, bitsPerSample: 8, samplesPerPixel: 4,
+                hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+            ))
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+            image.draw(in: NSRect(x: 0, y: 0, width: size, height: size))
+            NSGraphicsContext.restoreGraphicsState()
+            return try #require(rep.representation(using: .png, properties: [:]))
+        }
+        try compiler.add(catalogAt: root.appendingPathComponent("Assets.xcassets"))
+        #expect(compiler.warnings.isEmpty)
+        let car = try compiler.compile(deploymentTarget: "14.0", platform: "macosx")
+
+        let dir = root.appendingPathComponent("Vector.bundle")
+        try FileManager.default.createDirectory(at: dir.appendingPathComponent("Contents/Resources"), withIntermediateDirectories: true)
+        try PropertyListSerialization.data(
+            fromPropertyList: ["CFBundleIdentifier": "test.\(UUID().uuidString)"], format: .xml, options: 0
+        ).write(to: dir.appendingPathComponent("Contents/Info.plist"))
+        try car.write(to: dir.appendingPathComponent("Contents/Resources/Assets.car"))
+        let bundle = try #require(Bundle(path: dir.path))
+
+        let image = try #require(bundle.image(forResource: "Leaf"))
+        #expect(image.size == NSSize(width: 4, height: 4))
+        let cgImage = try #require(image.cgImage(forProposedRect: nil, context: nil, hints: nil))
+        let pixels = rgbaPixels(of: cgImage)
+        #expect(Array(pixels.prefix(4)) == [0, 255, 0, 255])
+    }
 }
 #endif

@@ -51,6 +51,11 @@ records, then the payload.
 |---|---|---|
 | PNG image | one `ARGB` per scale | `CELM` v2, compression 11 (`dmp2`) |
 | SVG image (preserving vectors) | one `SVG ` vector + `ARGB` at 1x and 2x | vector: `RAWD`, LZFSE-compressed SVG text |
+
+Vector renditions: part 42, pixel format `SVG `, flags 4, layout 9, color
+space 0, info records 0x3ec and 0x3ee as for colors; payload `RAWD`,
+version 1, length, LZFSE data. The bitmaps rendered from the same SVG are
+ordinary bitmap renditions with flags 0x114 (0x10 for plain bitmaps).
 | Color | one, pixel format 0 | `COLR` v1: color space, component count, components as `f64` |
 
 Info record types seen: 0x3e9 (slices), 0x3eb (metrics), 0x3ec, 0x3ee,
