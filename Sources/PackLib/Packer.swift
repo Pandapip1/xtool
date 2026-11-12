@@ -179,9 +179,7 @@ public struct Packer: Sendable {
             group.addTask {
                 switch command {
                 case .bundle(let package, let target):
-                    // SwiftPM's resource accessor looks in the main bundle's
-                    // resources directory (the bundle root on iOS).
-                    try await packFile(srcName: "\(package)_\(target).bundle", into: layout.resources)
+                    try await packFile(srcName: "\(package)_\(target).bundle", into: resourceBundleDirectory(layout))
                 case .binaryTarget(let name):
                     let src = URL(fileURLWithPath: "\(name).framework/\(name)", relativeTo: binDir)
                     let magic = Data("!<arch>\n".utf8)
@@ -301,3 +299,19 @@ extension Plan.Product {
         }
     }
 }
+
+extension Packer {
+    /// Where SwiftPM resource bundles go so that `Bundle.module` finds them.
+    /// Swift Build's accessor looks in the main bundle's resources directory
+    /// (Contents/Resources on macOS, the bundle root on iOS). SwiftPM's native
+    /// build system only looks at the main bundle's own URL (and then at the
+    /// absolute build directory), so for native Mac builds they have to sit at
+    /// the top of the .app.
+    func resourceBundleDirectory(_ layout: BundleLayout) -> URL {
+        if layout.platform == .macOS && buildSettings.buildSystem == .swiftPM {
+            return layout.root
+        }
+        return layout.resources
+    }
+}
+
