@@ -163,6 +163,11 @@ let package = Package(
             swiftSettings: swiftSettings,
         ),
         .testTarget(
+            name: "CarKitTests",
+            dependencies: ["CarKit"],
+            swiftSettings: swiftSettings,
+        ),
+        .testTarget(
             name: "XToolTests",
             dependencies: [
                 "XKit",
@@ -197,6 +202,12 @@ let package = Package(
                 .product(name: "libunxip", package: "unxip"),
             ],
             cSettings: cSettings,
+            swiftSettings: swiftSettings,
+        ),
+        // Writes compiled asset catalogs (Assets.car) without Apple's tools;
+        // see Documentation/Formats/AssetCatalog.md
+        .target(
+            name: "CarKit",
             swiftSettings: swiftSettings,
         ),
         .target(
