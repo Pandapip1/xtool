@@ -204,10 +204,16 @@ let package = Package(
             cSettings: cSettings,
             swiftSettings: swiftSettings,
         ),
+        .systemLibrary(
+            name: "CZlib",
+            pkgConfig: "zlib",
+            providers: [.apt(["zlib1g-dev"])]
+        ),
         // Writes compiled asset catalogs (Assets.car) without Apple's tools;
         // see Documentation/Formats/AssetCatalog.md
         .target(
             name: "CarKit",
+            dependencies: ["CZlib"],
             swiftSettings: swiftSettings,
         ),
         .target(
@@ -221,6 +227,7 @@ let package = Package(
             name: "PackLib",
             dependencies: [
                 "XUtils",
+                "CarKit",
                 "XcodeProjects",
                 .product(name: "Superutils", package: "xtool-core"),
                 .product(name: "Yams", package: "Yams"),

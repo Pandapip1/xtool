@@ -1,6 +1,7 @@
 import Foundation
 import XUtils
 import Subprocess
+import CarKit
 
 public struct Packer: Sendable {
     public let buildSettings: BuildSettings
@@ -134,6 +135,8 @@ public struct Packer: Sendable {
                 }
             }
         }
+
+        try compileAssetCatalogs(in: outputURL)
 
         let dest = URL(fileURLWithPath: "xtool").appendingPathComponent(outputURL.lastPathComponent)
         try? FileManager.default.removeItem(at: dest)
@@ -315,3 +318,64 @@ extension Packer {
     }
 }
 
+extension Packer {
+    /// Replaces the asset catalog sources (`*.xcassets`) packed into the app,
+    /// whether at its top level or inside a resource bundle, with a compiled
+    /// `Assets.car` in the same directory, built by CarKit rather than
+    /// Apple's actool.
+    func compileAssetCatalogs(in appURL: URL) throws {
+        var catalogsByDirectory: [URL: [URL]] = [:]
+        let enumerator = FileManager.default.enumerator(
+            at: appURL, includingPropertiesForKeys: [.isDirectoryKey]
+        )
+        while let url = enumerator?.nextObject() as? URL {
+            guard url.pathExtension == "xcassets" else { continue }
+            catalogsByDirectory[url.deletingLastPathComponent(), default: []].append(url)
+            enumerator?.skipDescendants()
+        }
+
+        let (idioms, platformName) = switch buildSettings.platform {
+        case .macOS: (["mac"], "macosx")
+        case .iOS: (["iphone", "ipad"], buildSettings.triple.contains("simulator") ? "iphonesimulator" : "iphoneos")
+        }
+
+        for (directory, catalogs) in catalogsByDirectory {
+            var compiler = AssetCatalog(idioms: idioms)
+            for catalog in catalogs.sorted(by: { $0.path < $1.path }) {
+                try compiler.add(catalogAt: catalog)
+            }
+            for warning in compiler.warnings {
+                print("warning: asset catalog: \(warning)")
+            }
+            let car = try compiler.compile(deploymentTarget: plan.app.deploymentTarget, platform: platformName)
+            try car.write(to: directory.appendingPathComponent("Assets.car"))
+            try ensureInfoPlist(forBundleContaining: directory)
+            for catalog in catalogs {
+                try FileManager.default.removeItem(at: catalog)
+            }
+        }
+    }
+}
+
+extension Packer {
+    /// The system only loads a bundle's compiled asset catalog when the bundle
+    /// has an identifier. SwiftPM's native build system makes resource bundles
+    /// without an Info.plist, so give a flat `.bundle` one if it lacks it.
+    fileprivate func ensureInfoPlist(forBundleContaining directory: URL) throws {
+        guard directory.pathExtension == "bundle" else { return }
+        let infoPlist = directory.appendingPathComponent("Info.plist")
+        let nested = directory.appendingPathComponent("Contents/Info.plist")
+        guard !FileManager.default.fileExists(atPath: infoPlist.path),
+              !FileManager.default.fileExists(atPath: nested.path)
+        else { return }
+        let name = directory.deletingPathExtension().lastPathComponent
+        let info: [String: Any] = [
+            "CFBundleIdentifier": "\(plan.app.bundleID).resources.\(name)",
+            "CFBundleName": name,
+            "CFBundlePackageType": "BNDL",
+            "CFBundleInfoDictionaryVersion": "6.0",
+        ]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+            .write(to: infoPlist)
+    }
+}
