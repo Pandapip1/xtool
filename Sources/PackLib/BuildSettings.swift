@@ -210,6 +210,15 @@ public enum BuildSystem: Sendable {
     case swiftBuild
 
     public static func `default`() async throws -> Self {
+        // An explicit choice, e.g. to sidestep a toolchain whose `codesign`
+        // Swift Build can't use: XTOOL_BUILD_SYSTEM=native|swiftbuild.
+        switch ProcessInfo.processInfo.environment["XTOOL_BUILD_SYSTEM"] {
+        case "native": return .swiftPM
+        case "swiftbuild": return .swiftBuild
+        case nil, "": break
+        case let other?:
+            throw StringError("XTOOL_BUILD_SYSTEM must be 'native' or 'swiftbuild', not '\(other)'")
+        }
         if try await SwiftVersion.current.supportsSwiftBuild {
             return .swiftBuild
         } else {
