@@ -98,8 +98,20 @@ public struct BuildSettings: Sendable {
         return result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// The toolchain's `tool`: the one on PATH when that is a real toolchain
+    /// (from swift.org, swiftly, Nix, ...), or the one xcrun selects when PATH
+    /// only has Apple's /usr/bin trampoline (the usual Xcode setup), so
+    /// Xcode or the Command Line Tools aren't required.
+    private static func locateTool(_ tool: String) async throws -> FilePath {
+        if let onPath = try? await ToolRegistry.locate(tool),
+           onPath.deletingLastPathComponent().standardizedFileURL.path != "/usr/bin" {
+            return try FilePath(onPath).orThrow(StringError("Got bad path for \(tool) executable"))
+        }
+        return try await FilePath(xcrun(["-f", tool]))
+    }
+
     private static let _swiftURL = Task {
-        try await FilePath(xcrun(["-f", "swift"]))
+        try await locateTool("swift")
     }
 
     public static func swiftURL() async throws -> FilePath {
@@ -107,7 +119,7 @@ public struct BuildSettings: Sendable {
     }
 
     private static let _swiftcURL = Task {
-        try await FilePath(xcrun(["-f", "swiftc"]))
+        try await locateTool("swiftc")
     }
 
     public static func swiftcURL() async throws -> FilePath {
