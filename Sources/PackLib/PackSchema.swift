@@ -71,8 +71,8 @@ public struct PackSchema: Sendable {
 
         if let iconPath = base.iconPath {
             let ext = URL(fileURLWithPath: iconPath).pathExtension
-            guard ext == "png" else {
-                throw StringError("xtool.yml: iconPath should have a 'png' path extension. Got '\(ext)'.")
+            guard ext == "png" || ext == "icon" else {
+                throw StringError("xtool.yml: iconPath should be a .png image or an .icon (Icon Composer) file. Got '\(ext)'.")
             }
         }
     }

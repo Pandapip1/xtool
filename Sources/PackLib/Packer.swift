@@ -207,7 +207,11 @@ public struct Packer: Sendable {
         }
         if let iconPath = product.iconPath {
             group.addTask {
-                try await packFileToResources(srcName: iconPath)
+                if URL(fileURLWithPath: iconPath).pathExtension == "icon" {
+                    try await packIconComposerIcon(at: iconPath, into: layout)
+                } else {
+                    try await packFileToResources(srcName: iconPath)
+                }
             }
         }
         group.addTask {
@@ -399,6 +403,42 @@ extension Packer {
                 throw StringError("resvg failed to render \(svg.lastPathComponent)")
             }
             return try Data(contentsOf: output)
+        }
+    }
+}
+
+extension Packer {
+    /// Renders an Icon Composer icon (`.icon`) with resvg: a full `.icns` on
+    /// macOS, a 1024-pixel square PNG on iOS (which masks icons itself), named
+    /// after the `.icon` so CFBundleIconFile finds it.
+    fileprivate func packIconComposerIcon(at path: String, into layout: BundleLayout) async throws {
+        guard let resvg = try? await ToolRegistry.locate("resvg") else {
+            throw StringError("xtool.yml: rendering \(path) needs resvg on PATH")
+        }
+        let icon = try IconComposerIcon(url: URL(fileURLWithPath: path))
+        let name = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+        let render = Self.svgRenderer(resvg: resvg)
+
+        func png(size: Int, shape: IconComposerIcon.Shape) throws -> Data {
+            let svg = FileManager.default.temporaryDirectory
+                .appendingPathComponent("xtool-icon-\(UUID().uuidString).svg")
+            defer { try? FileManager.default.removeItem(at: svg) }
+            try Data(icon.svg(size: size, shape: shape).utf8).write(to: svg)
+            return try render(svg, 1)
+        }
+
+        try FileManager.default.createDirectory(at: layout.resources, withIntermediateDirectories: true)
+        switch layout.platform {
+        case .macOS:
+            var pngs: [Int: Data] = [:]
+            for size in Set(ICNSWriter.entries.map(\.size)) {
+                pngs[size] = try png(size: size, shape: .macOS)
+            }
+            try ICNSWriter.write(pngs: pngs)
+                .write(to: layout.resources.appendingPathComponent("\(name).icns"))
+        case .iOS:
+            try png(size: 1024, shape: .square)
+                .write(to: layout.resources.appendingPathComponent("\(name).png"))
         }
     }
 }
