@@ -4,7 +4,7 @@ import Foundation
 /// observations in Documentation/Formats/AssetCatalog.md; fields are
 /// little-endian inside the BOM container's blocks.
 public struct CarWriter: Sendable {
-    public struct Bitmap: Sendable {
+    public struct Bitmap: Sendable, Equatable {
         public var scale: Int
         public var width: Int
         public var height: Int
@@ -64,11 +64,29 @@ public struct CarWriter: Sendable {
             case color(Color)
             /// From `start` to `stop` in unit coordinates of the icon, y down.
             case linearGradient(Color, Color, start: (x: Double, y: Double), stop: (x: Double, y: Double))
+            /// The system's own gradient for the appearance (light or dark).
+            case automatic
         }
 
-        public enum Image: Sendable {
-            case svg(Data)
+        public enum Image: Sendable, Equatable {
+            /// `colorSpace` is the color space untagged colors in the SVG are
+            /// in: 0 unspecified (sRGB), 3 Display P3.
+            case svg(Data, colorSpace: UInt32 = 0)
             case bitmap(Bitmap)
+        }
+
+        /// The groups (and, for dark, the background) of an appearance other
+        /// than the default, light one.
+        public struct Look: Sendable {
+            /// Nil or `.automatic` gives the system's gradient. Ignored for the
+            /// tinted appearance, which uses the light background, as actool does.
+            public var fill: Fill?
+            public var groups: [Group]
+
+            public init(fill: Fill?, groups: [Group]) {
+                self.fill = fill
+                self.groups = groups
+            }
         }
 
         public struct Layer: Sendable {
@@ -79,8 +97,8 @@ public struct CarWriter: Sendable {
             public var blendMode: UInt32 = 0
             public var opacity: Double = 1
             public var glass = false
-            /// Paints the image's shape in this color instead of its own.
-            public var fill: Color?
+            /// Paints the image's shape with this instead of its own colors.
+            public var fill: Fill?
 
             public init(image: Image, x: Int, y: Int, width: Int, height: Int) {
                 self.image = image
@@ -105,6 +123,8 @@ public struct CarWriter: Sendable {
             public var translucency: Double = 0.3
             public var shadow = Shadow.neutral
             public var shadowOpacity: Double = 0.5
+            /// Refraction of what is behind the group's glass; nil when off.
+            public var refraction: (strength: Double, depth: Double)?
 
             public init(layers: [Layer]) {
                 self.layers = layers
@@ -112,14 +132,21 @@ public struct CarWriter: Sendable {
         }
 
         public var name: String
-        /// Nil leaves the default (white) background.
+        /// The light (default) appearance. A nil fill gives a white
+        /// background; `.automatic` the system's light gradient.
         public var fill: Fill?
         public var groups: [Group]
+        /// Nil means the same groups as light, on the system's dark background.
+        public var dark: Look?
+        /// Nil means the same groups as light.
+        public var tinted: Look?
 
-        public init(name: String, fill: Fill?, groups: [Group]) {
+        public init(name: String, fill: Fill?, groups: [Group], dark: Look? = nil, tinted: Look? = nil) {
             self.name = name
             self.fill = fill
             self.groups = groups
+            self.dark = dark
+            self.tinted = tinted
         }
     }
 
@@ -419,7 +446,7 @@ public struct CarWriter: Sendable {
         )
     }
 
-    func vectorRendition(name: String, svg: Data) throws -> Data {
+    func vectorRendition(name: String, svg: Data, colorSpace: UInt32 = 0) throws -> Data {
         var info = Data()
         info += self.info(.composition, [0, 0x3f80_0000])
         info += self.info(.uti, [1])
@@ -431,7 +458,7 @@ public struct CarWriter: Sendable {
         payload += compressed
         return rendition(
             name: name, flags: 4, width: 0, height: 0, scale: 0,
-            pixelFormat: "SVG ", colorSpace: 0, layout: 9, info: info, payload: payload
+            pixelFormat: "SVG ", colorSpace: colorSpace, layout: 9, info: info, payload: payload
         )
     }
 

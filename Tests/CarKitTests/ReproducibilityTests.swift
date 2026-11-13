@@ -9,7 +9,7 @@ struct ReproducibilityTests {
     private func assets() -> [CarWriter.Asset] {
         let svg = Data(#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"/>"#.utf8)
         var layer = CarWriter.LayeredIcon.Layer(image: .svg(svg), x: 0, y: 0, width: 8, height: 8)
-        layer.fill = .sRGB(1, 0, 0)
+        layer.fill = .color(.sRGB(1, 0, 0))
         let icon = CarWriter.LayeredIcon(
             name: "AppIcon",
             fill: .linearGradient(.sRGB(0, 0, 1), .gray(0.5), start: (0.5, 0), stop: (0.5, 1)),

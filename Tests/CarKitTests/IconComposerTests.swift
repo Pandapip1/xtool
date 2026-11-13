@@ -99,3 +99,36 @@ struct LayeredIconTests {
     }
 }
 #endif
+
+struct IconComposerSpecializationTests {
+    @Test func resolvesPropertiesPerAppearance() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("IconComposerSpecializationTests-\(UUID().uuidString).icon")
+        try FileManager.default.createDirectory(at: url.appendingPathComponent("Assets"), withIntermediateDirectories: true)
+        try Data(#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>"#.utf8)
+            .write(to: url.appendingPathComponent("Assets/L.svg"))
+        try Data("""
+        {"fill-specializations":[{"value":{"solid":"srgb:1,0,0,1"}},{"appearance":"dark","value":"automatic"},
+                                 {"appearance":"tinted","value":{"solid":"srgb:0,1,0,1"}}],
+         "groups":[{"opacity-specializations":[{"value":1},{"appearance":"tinted","value":0.4}],
+                    "refractivity":{"enabled":true,"depth":0.5,"strength":0.7},
+                    "layers":[{"image-name":"L.svg","glass":false,
+                               "glass-specializations":[{"appearance":"dark","value":true}],
+                               "fill-specializations":[{"value":{"solid":"gray:0.5,1"}},{"appearance":"dark","value":"none"}]}]}]}
+        """.utf8).write(to: url.appendingPathComponent("icon.json"))
+
+        let light = try IconComposerIcon(url: url, appearance: .light)
+        let dark = try IconComposerIcon(url: url, appearance: .dark)
+        let tinted = try IconComposerIcon(url: url, appearance: .tinted)
+
+        #expect(light.fill == .solid(try #require(IconComposerIcon.Color("srgb:1,0,0,1"))))
+        #expect(dark.fill == .automatic)
+        // The tinted appearance keeps the light background, as actool does.
+        #expect(tinted.fill == light.fill)
+        #expect(light.groups[0].opacity == 1 && tinted.groups[0].opacity == 0.4)
+        // A plain key wins over its specializations.
+        #expect(light.layers[0].glass == false && dark.layers[0].glass == false)
+        #expect(light.layers[0].fill != nil && dark.layers[0].fill == nil)
+        #expect(light.groups[0].refraction?.strength == 0.7 && light.groups[0].refraction?.depth == 0.5)
+    }
+}

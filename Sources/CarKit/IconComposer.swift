@@ -42,12 +42,15 @@ public struct IconComposerIcon: Sendable {
 
     public enum Fill: Sendable, Equatable {
         case solid(Color)
+        /// The system's own background for the appearance.
+        case automatic
         /// From `start` to `stop`, in unit coordinates of the icon (y down).
         case linearGradient(colors: [Color], start: (x: Double, y: Double), stop: (x: Double, y: Double))
 
         public static func == (lhs: Fill, rhs: Fill) -> Bool {
             switch (lhs, rhs) {
             case (.solid(let a), .solid(let b)): a == b
+            case (.automatic, .automatic): true
             case (.linearGradient(let a, let s1, let e1), .linearGradient(let b, let s2, let e2)):
                 a == b && s1 == s2 && e1 == e2
             default: false
@@ -67,8 +70,8 @@ public struct IconComposerIcon: Sendable {
         public var glass: Bool
         /// A `CGBlendMode` value.
         public var blendMode: UInt32
-        /// Paints the image's shape in this color.
-        public var fill: Color?
+        /// Paints the image's shape with this instead of its own colors.
+        public var fill: Fill?
     }
 
     public struct Group: Sendable {
@@ -83,43 +86,74 @@ public struct IconComposerIcon: Sendable {
         /// "neutral", "layer-color" or "none".
         public var shadow: String
         public var shadowOpacity: Double
+        /// Refraction of what is behind the group's glass; nil when off.
+        public var refraction: (strength: Double, depth: Double)?
+    }
+
+    /// The appearances an icon can specialize its properties for
+    /// (`*-specializations` in icon.json).
+    public enum Appearance: String, Sendable, CaseIterable {
+        case light, dark, tinted
     }
 
     /// Icon Composer draws on a 1024-point square.
     public static let canvas = 1024.0
 
+    /// The `.icon` this was read from.
+    public let url: URL
+    /// The appearance the properties below are resolved for.
+    public let appearance: Appearance
     public var fill: Fill?
     /// Bottom-most first.
     public var groups: [Group]
     /// Every visible layer, bottom-most first.
     public var layers: [Layer] { groups.flatMap(\.layers) }
+    /// The CoreUI color space of untagged colors in the layers' SVGs:
+    /// 0 unspecified (sRGB), 3 Display P3.
+    public var svgColorSpace: UInt32
 
-    public init(url: URL) throws {
+    /// Reads the icon with its properties as they are in `appearance`.
+    ///
+    /// A property `p` can be given for each appearance as `p-specializations`:
+    /// a list of `{"value": ...}`, `{"appearance": "dark", "value": ...}` and so
+    /// on. A plain `p` takes precedence over that; otherwise the appearance's
+    /// own entry, then the one without an appearance. The tinted appearance
+    /// takes the light background, as actool does.
+    public init(url: URL, appearance: Appearance = .light) throws {
+        self.url = url
+        self.appearance = appearance
         let json = try JSONSerialization.jsonObject(with: Data(contentsOf: url.appendingPathComponent("icon.json")))
         guard let root = json as? [String: Any] else { throw CarError("\(url.lastPathComponent): icon.json is not an object") }
 
-        fill = try Self.fill(root["fill"])
+        func value(_ object: [String: Any], _ key: String, for appearance: Appearance = appearance) -> Any? {
+            if let plain = object[key] { return plain }
+            guard let entries = object["\(key)-specializations"] as? [[String: Any]] else { return nil }
+            if appearance != .light,
+               let entry = entries.first(where: { $0["appearance"] as? String == appearance.rawValue }) {
+                return entry["value"]
+            }
+            return entries.first { $0["appearance"] == nil }?["value"]
+        }
+
+        fill = try Self.fill(value(root, "fill", for: appearance == .tinted ? .light : appearance))
+        svgColorSpace = root["color-space-for-untagged-svg-colors"] as? String == "display-p3" ? 3 : 0
 
         func position(_ object: [String: Any]) -> (scale: Double, x: Double, y: Double) {
-            let position = object["position"] as? [String: Any] ?? [:]
+            let position = value(object, "position") as? [String: Any] ?? [:]
             let translation = position["translation-in-points"] as? [Double] ?? [0, 0]
             return (position["scale"] as? Double ?? 1, translation.first ?? 0, translation.dropFirst().first ?? 0)
         }
 
         // Groups and their layers are listed top-most first.
         var groups: [Group] = []
-        for group in (root["groups"] as? [[String: Any]] ?? []).reversed() where group["hidden"] as? Bool != true {
-            let groupOpacity = group["opacity"] as? Double ?? 1
+        for group in (root["groups"] as? [[String: Any]] ?? []).reversed() where value(group, "hidden") as? Bool != true {
+            let groupOpacity = value(group, "opacity") as? Double ?? 1
             let groupPosition = position(group)
             var layers: [Layer] = []
-            for layer in (group["layers"] as? [[String: Any]] ?? []).reversed() where layer["hidden"] as? Bool != true {
+            for layer in (group["layers"] as? [[String: Any]] ?? []).reversed() where value(layer, "hidden") as? Bool != true {
                 guard let name = layer["image-name"] as? String else { continue }
                 let own = position(layer)
-                let opacity = layer["opacity"] as? Double ?? 1
-                var fill: Color?
-                if let object = layer["fill"] as? [String: Any], let solid = object["solid"] as? String {
-                    fill = try Self.color(solid)
-                }
+                let opacity = value(layer, "opacity") as? Double ?? 1
                 layers.append(Layer(
                     image: url.appendingPathComponent("Assets").appendingPathComponent(name),
                     // The group scales about the canvas center, then moves.
@@ -127,23 +161,27 @@ public struct IconComposerIcon: Sendable {
                     translation: (own.x * groupPosition.scale + groupPosition.x, own.y * groupPosition.scale + groupPosition.y),
                     opacity: opacity * groupOpacity,
                     ownOpacity: opacity,
-                    glass: layer["glass"] as? Bool ?? true, // on unless turned off
-                    blendMode: Self.blendModes[layer["blend-mode"] as? String ?? "normal"] ?? 0,
-                    fill: fill
+                    glass: value(layer, "glass") as? Bool ?? true, // on unless turned off
+                    blendMode: Self.blendModes[value(layer, "blend-mode") as? String ?? "normal"] ?? 0,
+                    // "none" (and "automatic") leave the image's own colors.
+                    fill: try Self.fill(value(layer, "fill")).flatMap { $0 == .automatic ? nil : $0 }
                 ))
             }
             guard !layers.isEmpty else { continue }
-            let translucency = group["translucency"] as? [String: Any]
-            let shadow = group["shadow"] as? [String: Any]
+            let translucency = value(group, "translucency") as? [String: Any]
+            let shadow = value(group, "shadow") as? [String: Any]
+            let refractivity = value(group, "refractivity") as? [String: Any]
             groups.append(Group(
                 layers: layers,
                 opacity: groupOpacity,
-                combinedLighting: group["lighting"] as? String == "combined",
-                blur: group["blur-material"] as? Double ?? 0,
-                specular: group["specular"] as? Bool ?? true,
+                combinedLighting: value(group, "lighting") as? String == "combined",
+                blur: value(group, "blur-material") as? Double ?? 0,
+                specular: value(group, "specular") as? Bool ?? true,
                 translucency: translucency?["enabled"] as? Bool == false ? 0 : translucency?["value"] as? Double ?? 0.3,
                 shadow: shadow?["kind"] as? String ?? "neutral",
-                shadowOpacity: shadow?["opacity"] as? Double ?? 0.5
+                shadowOpacity: shadow?["opacity"] as? Double ?? 0.5,
+                refraction: refractivity?["enabled"] as? Bool == true
+                    ? (refractivity?["strength"] as? Double ?? 0, refractivity?["depth"] as? Double ?? 0) : nil
             ))
         }
         self.groups = groups
@@ -160,31 +198,52 @@ public struct IconComposerIcon: Sendable {
     /// The icon as layers and materials that the system renders itself, for
     /// an asset catalog.
     public func layeredIcon(name: String) throws -> CarWriter.LayeredIcon {
-        // actool keeps three decimals, rounded as "%.3f" does (from the exact
-        // binary value, ties to even), stored as single precision. The
-        // system's rendering is sensitive enough to the difference to shift
-        // colors by about one level out of 255, so do the same.
+        let light = appearance == .light ? self : try IconComposerIcon(url: url, appearance: .light)
+        let dark = try IconComposerIcon(url: url, appearance: .dark)
+        let tinted = try IconComposerIcon(url: url, appearance: .tinted)
+        return CarWriter.LayeredIcon(
+            name: name,
+            fill: try light.carFill(),
+            groups: try light.carGroups(),
+            dark: .init(fill: try dark.carFill(), groups: try dark.carGroups()),
+            tinted: .init(fill: nil, groups: try tinted.carGroups())
+        )
+    }
+
+    /// actool keeps three decimals, rounded as "%.3f" does (from the exact
+    /// binary value, ties to even), stored as single precision. The system's
+    /// rendering is sensitive enough to the difference to shift colors by
+    /// about one level out of 255, so do the same.
+    private static func carColor(_ color: Color) -> CarWriter.LayeredIcon.Color {
         func quantize(_ v: Double) -> Double { Double(Float(String(format: "%.3f", v))!) }
-        func color(_ color: Color) -> CarWriter.LayeredIcon.Color {
-            let space = Color.spaces[color.space]!
-            let components = color.space.hasSuffix("gray")
-                ? [color.red, color.alpha] : [color.red, color.green, color.blue, color.alpha]
-            return .init(space: space, components: components.map(quantize))
+        let space = Color.spaces[color.space]!
+        let components = color.space.hasSuffix("gray")
+            ? [color.red, color.alpha] : [color.red, color.green, color.blue, color.alpha]
+        return .init(space: space, components: components.map(quantize))
+    }
+
+    private static func carFill(_ fill: Fill) -> CarWriter.LayeredIcon.Fill {
+        switch fill {
+        case .solid(let c): .color(carColor(c))
+        case .linearGradient(let colors, let start, let stop):
+            .linearGradient(carColor(colors[0]), carColor(colors.count > 1 ? colors[1] : colors[0]), start: start, stop: stop)
+        case .automatic: .automatic
         }
-        let fill: CarWriter.LayeredIcon.Fill? = switch fill {
-        case .solid(let c)?: .color(color(c))
-        case .linearGradient(let colors, let start, let stop)?:
-            .linearGradient(color(colors[0]), color(colors.count > 1 ? colors[1] : colors[0]), start: start, stop: stop)
-        case nil: nil
-        }
-        return CarWriter.LayeredIcon(name: name, fill: fill, groups: try groups.map { group in
+    }
+
+    private func carFill() throws -> CarWriter.LayeredIcon.Fill? {
+        fill.map(Self.carFill)
+    }
+
+    private func carGroups() throws -> [CarWriter.LayeredIcon.Group] {
+        try groups.map { group in
             var result = CarWriter.LayeredIcon.Group(layers: try group.layers.map { layer in
                 let data = try Data(contentsOf: layer.image)
                 let image: CarWriter.LayeredIcon.Image
                 let size: (Double, Double)
                 switch layer.image.pathExtension.lowercased() {
                 case "svg":
-                    image = .svg(data)
+                    image = .svg(data, colorSpace: svgColorSpace)
                     size = Self.svgSize(String(decoding: data, as: UTF8.self)) ?? (Self.canvas, Self.canvas)
                 case "png":
                     let png = try PNGDecoder.decode(data)
@@ -194,16 +253,17 @@ public struct IconComposerIcon: Sendable {
                     throw CarError("\(layer.image.lastPathComponent): unsupported icon layer image type")
                 }
                 let w = size.0 * layer.scale, h = size.1 * layer.scale
+                // Origins round down and sizes to nearest, as actool's do.
                 var result = CarWriter.LayeredIcon.Layer(
                     image: image,
-                    x: Int(((Self.canvas - w) / 2 + layer.translation.x).rounded()),
-                    y: Int(((Self.canvas - h) / 2 + layer.translation.y).rounded()),
+                    x: Int(((Self.canvas - w) / 2 + layer.translation.x).rounded(.down)),
+                    y: Int(((Self.canvas - h) / 2 + layer.translation.y).rounded(.down)),
                     width: Int(w.rounded()), height: Int(h.rounded())
                 )
                 result.blendMode = layer.blendMode
                 result.opacity = layer.ownOpacity
                 result.glass = layer.glass
-                result.fill = layer.fill.map(color)
+                result.fill = layer.fill.map(Self.carFill)
                 return result
             })
             result.opacity = group.opacity
@@ -217,8 +277,9 @@ public struct IconComposerIcon: Sendable {
             default: .neutral
             }
             result.shadowOpacity = group.shadowOpacity
+            result.refraction = group.refraction
             return result
-        })
+        }
     }
 
     /// A color, or an error naming it when it is not one Icon Composer writes.
@@ -227,7 +288,10 @@ public struct IconComposerIcon: Sendable {
         return color
     }
 
+    /// A fill: an object with "solid" or "linear-gradient", or "automatic" (the
+    /// system's), or "none" and anything else, nil.
     private static func fill(_ value: Any?) throws -> Fill? {
+        if value as? String == "automatic" { return .automatic }
         guard let fill = value as? [String: Any] else { return nil }
         if let solid = fill["solid"] as? String {
             return .solid(try color(solid))
@@ -265,11 +329,19 @@ public struct IconComposerIcon: Sendable {
         <clipPath id="shape"><rect x="\(inset)" y="\(inset)" width="\(side)" height="\(side)" rx="\(radius)"/></clipPath>
         """
         var background = ""
-        switch fill {
-        case .solid(let color)?:
+        // No fill is white; "automatic" the system's light gradient (both as actool has them).
+        let white = Color("gray:1,1")!
+        let systemLight = Fill.linearGradient(colors: [white, Color("gray:0.925,1")!], start: (0.5, 0), stop: (0.5, 1))
+        let backgroundFill: Fill = switch fill {
+        case nil: .solid(white)
+        case .automatic?: systemLight
+        case let fill?: fill
+        }
+        switch backgroundFill {
+        case .solid(let color):
             let c = color.svg
             background = #"<rect x="\#(inset)" y="\#(inset)" width="\#(side)" height="\#(side)" fill="\#(c.color)" fill-opacity="\#(c.opacity)"/>"#
-        case .linearGradient(let colors, let start, let stop)?:
+        case .linearGradient(let colors, let start, let stop):
             let stops = colors.enumerated().map { i, color in
                 let c = color.svg
                 let offset = colors.count == 1 ? 0 : Double(i) / Double(colors.count - 1)
@@ -277,7 +349,7 @@ public struct IconComposerIcon: Sendable {
             }.joined()
             defs += #"<linearGradient id="fill" x1="\#(start.x)" y1="\#(start.y)" x2="\#(stop.x)" y2="\#(stop.y)">\#(stops)</linearGradient>"#
             background = #"<rect x="\#(inset)" y="\#(inset)" width="\#(side)" height="\#(side)" fill="url(#fill)"/>"#
-        case nil:
+        case .automatic:
             break
         }
 

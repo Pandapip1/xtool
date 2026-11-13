@@ -134,7 +134,9 @@ An icon named `N` is a set of renditions, all element 85:
 - **Group** (part 246, one per appearance), named `IconGroup`, size 0, layout
   `0x3fc`, same empty payload. Its layers are images.
 - **Layer image** (part 181): an SVG (as a vector rendition, named
-  `image.svg`) or a bitmap (as an image rendition, named `image.png`).
+  `image.svg`) or a bitmap (as an image rendition, named `image.png`). With
+  `"color-space-for-untagged-svg-colors": "display-p3"` the SVG rendition's
+  header color space is 3 (Display P3) rather than 0; its data is unchanged.
 - **Colors** (part 217) as `COLR` with a color space: `srgb` 1, `gray` 2,
   `display-p3` 3, `extended-srgb` 4, `extended-gray` 6 (actool rejects any
   other, such as `extended-display-p3`). Components are rounded to three
@@ -146,10 +148,24 @@ An icon named `N` is a set of renditions, all element 85:
   then two stops of f32 location and a length-prefixed, NUL-terminated color
   name.
 
-The dark stack's fill is always a gradient `N_Assets/system-dark`, gray 0.192
-to gray 0.078 (space 2) from (0.5, 0) to (0.5, 1). The light and tintable
-stacks use the icon's fill: a gradient, a color, or extended-gray white (1, 1)
-when the icon has none.
+The light and tintable stacks use the icon's fill: a gradient, a color,
+extended-gray white (1, 1) when the icon has none, or, for `"automatic"`, a
+gradient `N_Assets/system-light`, gray 1.0 to gray 0.925 (space 2) from
+(0.5, 0) to (0.5, 1). The dark stack uses the dark fill when the icon gives
+one, and otherwise (or for `"automatic"`) `N_Assets/system-dark`, gray 0.192
+to 0.078 the same way. A tinted fill is ignored: the tintable stack always
+has the light one.
+
+Layer frames are the image's size times the layer's and its group's scale,
+centered on the canvas and moved by the translations; actool rounds the
+origin down and the size to nearest (x 179.5 is 179; a width of 665.6, 666).
+
+Properties can differ by appearance (`icon.json`'s `p-specializations`: a
+list of `{"value": ...}` and `{"appearance": "dark"|"tinted", "value": ...}`).
+Each appearance's stack and group renditions simply carry that appearance's
+values: fills, glass, layer and group opacity, translucency. A plain `p`
+takes precedence over `p-specializations` (a layer with `"fill": "none"`
+ignores its fill specializations).
 
 Stack and group carry four info records, each `u32 count, u32 0` followed by
 one entry per layer, bottom-most first (groups in reverse `icon.json` order):
@@ -162,14 +178,17 @@ one entry per layer, bottom-most first (groups in reverse `icon.json` order):
   frames; the stack's entry for the group carries the group's opacity.
 - `0x3fc`, variable: for an image layer, u32 glass (1 on, the default when
   `icon.json` omits it), u32 0, and a length-prefixed fill color name (`""`
-  when the layer keeps its own colors). For a group in the stack, u32
+  when the layer keeps its own colors). The fill may be a color or a gradient
+  rendition, referred to by name. For a group in the stack, u32
   lighting (2 individual, 0 combined), f32 blur material, and `""`. The fill
   entry is u32 0, u32 0, `""`.
 - `0x3fd`, 20 bytes each: for a group in the stack, u32 specular, f32
   translucency (0 when off; default 0.3), u32 shadow kind (0 none, 2 layer
   color, 3 neutral; default neutral), f32 shadow opacity (default 0.5), u32 0.
   Zero for every other entry.
-- `0x3fe`, 12 bytes each, all zero in every variant tried.
+- `0x3fe`, 12 bytes each: for a group in the stack, refractivity: f32
+  strength, f32 depth, u32 0, all zero when it is off. Zero for every other
+  entry. (`icon.json`'s `"features": ["refractivity"]` makes no difference.)
 
 actool also writes flattened bitmaps of the icon (part 220, with a size
 attribute 9 and a packed atlas, plus a part 218 multisize set) and an
@@ -182,8 +201,7 @@ icons.
 - Whether compression 2 means anything distinct (uncompressed data decodes
   the same as with 0).
 - Appearance variants of ordinary color and image sets (dark mode).
-- `0x3fe`'s purpose, the `0x3fc`/`0x3f4` fields that are always 0, and
-  per-appearance specializations in `icon.json` (`*-specializations`), which
-  CarKit ignores.
+- The `0x3fc`/`0x3f4`/`0x3fe` fields that are always 0, and specializations
+  of properties not tried (blur, shadow, lighting, position, hidden).
 - iOS: the same renditions are presumably what iOS 26 uses, but xtool still
   gives iOS apps a flat PNG icon.
