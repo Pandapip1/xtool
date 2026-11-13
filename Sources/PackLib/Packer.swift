@@ -242,7 +242,7 @@ public struct Packer: Sendable {
                 info["CFBundleIconFile"] = iconName
                 // The layered icon in Assets.car; CFBundleIconFile's .icns
                 // remains for systems that predate layered icons.
-                if let layered = Packer.layeredIconName(iconPath: iconPath, platform: product.platform) {
+                if let layered = AssetCompiler.layeredIconName(iconPath: iconPath, platform: product.platform) {
                     info["CFBundleIconName"] = layered
                 }
             }
@@ -355,37 +355,27 @@ extension Packer {
             enumerator?.skipDescendants()
         }
 
-        var appIcon: (directory: String, asset: CarWriter.Asset)?
+        // The app's layered icon goes into its own catalog.
+        let resources = BundleLayout(root: appURL, platform: buildSettings.platform).resources.standardizedFileURL.path
+        var appIcon: URL?
         if let iconPath = plan.app.iconPath,
-           let name = Self.layeredIconName(iconPath: iconPath, platform: buildSettings.platform) {
-            let resources = BundleLayout(root: appURL, platform: buildSettings.platform)
-                .resources.standardizedFileURL.path
-            let icon = try IconComposerIcon(url: URL(fileURLWithPath: iconPath))
-            appIcon = (resources, .layeredIcon(try icon.layeredIcon(name: name)))
+           AssetCompiler.layeredIconName(iconPath: iconPath, platform: buildSettings.platform) != nil {
+            appIcon = URL(fileURLWithPath: iconPath)
             catalogsByDirectory[resources, default: []] += []
         }
 
-        let (idioms, platformName, vectorScales) = switch buildSettings.platform {
-        case .macOS: (["mac"], "macosx", [1, 2])
-        case .iOS: (["iphone", "ipad"], buildSettings.triple.contains("simulator") ? "iphonesimulator" : "iphoneos", [2, 3])
-        }
+        let compiler = AssetCompiler(
+            platform: buildSettings.platform,
+            simulator: buildSettings.triple.contains("simulator"),
+            deploymentTarget: plan.app.deploymentTarget
+        )
         let resvg = catalogsByDirectory.isEmpty ? nil : try? await ToolRegistry.locate("resvg")
 
         for (path, catalogs) in catalogsByDirectory {
             let directory = URL(fileURLWithPath: path, isDirectory: true)
-            var compiler = AssetCatalog(idioms: idioms)
-            compiler.vectorScales = vectorScales
-            compiler.renderSVG = resvg.map(Self.svgRenderer(resvg:))
-            for catalog in catalogs.sorted(by: { $0.path < $1.path }) {
-                try compiler.add(catalogAt: catalog)
-            }
-            if let appIcon, appIcon.directory == path {
-                compiler.add(appIcon.asset)
-            }
-            for warning in compiler.warnings {
-                print("warning: asset catalog: \(warning)")
-            }
-            let car = try compiler.compile(deploymentTarget: plan.app.deploymentTarget, platform: platformName)
+            let car = try compiler.compile(
+                catalogs: catalogs, appIcon: path == resources ? appIcon : nil, resvg: resvg
+            )
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try car.write(to: directory.appendingPathComponent("Assets.car"))
             try ensureInfoPlist(forBundleContaining: directory)
@@ -393,16 +383,6 @@ extension Packer {
                 try FileManager.default.removeItem(at: catalog)
             }
         }
-    }
-}
-
-extension Packer {
-    /// The asset catalog name of the app's layered icon, when it has one: an
-    /// Icon Composer icon on macOS. (iOS still gets a flat PNG.)
-    static func layeredIconName(iconPath: String, platform: Platform) -> String? {
-        let url = URL(fileURLWithPath: iconPath)
-        guard platform == .macOS, url.pathExtension == "icon" else { return nil }
-        return url.deletingPathExtension().lastPathComponent
     }
 }
 
@@ -430,57 +410,13 @@ extension Packer {
 }
 
 extension Packer {
-    /// Renders SVGs for asset catalogs with resvg (https://github.com/linebender/resvg).
-    fileprivate static func svgRenderer(resvg: URL) -> AssetCatalog.SVGRenderer {
-        { svg, scale in
-            let output = FileManager.default.temporaryDirectory
-                .appendingPathComponent("xtool-svg-\(UUID().uuidString).png")
-            defer { try? FileManager.default.removeItem(at: output) }
-            let process = Process()
-            process.executableURL = resvg
-            process.arguments = ["--zoom", "\(scale)", svg.path, output.path]
-            try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else {
-                throw StringError("resvg failed to render \(svg.lastPathComponent)")
-            }
-            return try Data(contentsOf: output)
-        }
-    }
-}
-
-extension Packer {
-    /// Renders an Icon Composer icon (`.icon`) with resvg: a full `.icns` on
-    /// macOS, a 1024-pixel square PNG on iOS (which masks icons itself), named
-    /// after the `.icon` so CFBundleIconFile finds it.
+    /// Renders an Icon Composer icon flat into the app's resources, for
+    /// CFBundleIconFile (see AssetCompiler.renderFlatIcon).
     fileprivate func packIconComposerIcon(at path: String, into layout: BundleLayout) async throws {
         guard let resvg = try? await ToolRegistry.locate("resvg") else {
             throw StringError("xtool.yml: rendering \(path) needs resvg on PATH")
         }
-        let icon = try IconComposerIcon(url: URL(fileURLWithPath: path))
-        let name = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
-        let render = Self.svgRenderer(resvg: resvg)
-
-        func png(size: Int, shape: IconComposerIcon.Shape) throws -> Data {
-            let svg = FileManager.default.temporaryDirectory
-                .appendingPathComponent("xtool-icon-\(UUID().uuidString).svg")
-            defer { try? FileManager.default.removeItem(at: svg) }
-            try Data(icon.svg(size: size, shape: shape).utf8).write(to: svg)
-            return try render(svg, 1)
-        }
-
-        try FileManager.default.createDirectory(at: layout.resources, withIntermediateDirectories: true)
-        switch layout.platform {
-        case .macOS:
-            var pngs: [Int: Data] = [:]
-            for size in Set(ICNSWriter.entries.map(\.size)) {
-                pngs[size] = try png(size: size, shape: .macOS)
-            }
-            try ICNSWriter.write(pngs: pngs)
-                .write(to: layout.resources.appendingPathComponent("\(name).icns"))
-        case .iOS:
-            try png(size: 1024, shape: .square)
-                .write(to: layout.resources.appendingPathComponent("\(name).png"))
-        }
+        try AssetCompiler(platform: layout.platform, deploymentTarget: plan.app.deploymentTarget)
+            .renderFlatIcon(URL(fileURLWithPath: path), into: layout.resources, resvg: resvg)
     }
 }
