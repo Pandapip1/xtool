@@ -13,6 +13,20 @@ struct PackOperation {
             help: "Build with configuration"
         ) var configuration: BuildConfiguration = .debug
 
+        @Option(
+            name: .customLong("Xswiftpm", withSingleDash: true),
+            parsing: .unconditionalSingleValue,
+            help: ArgumentHelp(
+                "Pass a flag to every SwiftPM command xtool runs",
+                discussion: """
+                For example, to build offline from dependencies already in .build \
+                (as in a sandboxed build): -Xswiftpm --disable-automatic-resolution \
+                -Xswiftpm --skip-update
+                """,
+                valueName: "flag"
+            )
+        ) var swiftPMFlags: [String] = []
+
         init() {}
 
         init(configuration: BuildConfiguration) {
@@ -58,7 +72,7 @@ struct PackOperation {
         let buildSettings = try await BuildSettings(
             configuration: buildOptions.configuration,
             triple: triple ?? Self.defaultTriple,
-            options: []
+            options: buildOptions.swiftPMFlags
         )
 
         let planner = Planner(
