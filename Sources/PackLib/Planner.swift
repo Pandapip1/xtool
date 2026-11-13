@@ -211,7 +211,24 @@ public struct Planner: Sendable {
             let data = try await Data(reading: URL(fileURLWithPath: plist))
             let info = try PropertyListSerialization.propertyList(from: data, format: nil)
             if let info = info as? [String: Sendable] {
-                infoPlist.merge(info, uniquingKeysWith: { $1 })
+                // An Info.plist shared with an Xcode project refers to build
+                // settings; give the ones xtool knows their values here.
+                var settings = [
+                    "EXECUTABLE_NAME": library.name,
+                    "PRODUCT_NAME": library.name,
+                    "TARGET_NAME": library.name,
+                    "PRODUCT_MODULE_NAME": library.name,
+                    "PRODUCT_BUNDLE_IDENTIFIER": bundleID,
+                    "PRODUCT_BUNDLE_PACKAGE_TYPE": type.fourCharCode,
+                    "DEVELOPMENT_LANGUAGE": "en",
+                ]
+                settings[platform == .macOS ? "MACOSX_DEPLOYMENT_TARGET" : "IPHONEOS_DEPLOYMENT_TARGET"] = deploymentTarget
+                var unknown: Set<String> = []
+                let expanded = BuildSettingExpansion.expand(info, settings: settings, unknown: &unknown)
+                for name in unknown.sorted() {
+                    print("warning: \(plist): build setting $(\(name)) is not known to xtool; left as is")
+                }
+                infoPlist.merge(expanded, uniquingKeysWith: { $1 })
             } else {
                 throw StringError("Info.plist has invalid format: expected a dictionary.")
             }
