@@ -322,17 +322,16 @@ extension Plan.Product {
 }
 
 extension Packer {
-    /// Where SwiftPM resource bundles go so that `Bundle.module` finds them.
-    /// Swift Build's accessor looks in the main bundle's resources directory
-    /// (Contents/Resources on macOS, the bundle root on iOS). SwiftPM's native
-    /// build system only looks at the main bundle's own URL (and then at the
-    /// absolute build directory), so for native Mac builds they have to sit at
-    /// the top of the .app.
+    /// Where SwiftPM resource bundles go so that `Bundle.module` finds them:
+    /// the main bundle's resources directory (Contents/Resources on macOS,
+    /// the bundle root on iOS), where Swift Build's accessor looks.
+    ///
+    /// SwiftPM's native build system's accessor needs a toolchain whose
+    /// accessor also checks `Bundle.main.resourceURL`. Unpatched, it only
+    /// looks next to the main bundle, i.e. the top of a macOS .app, outside
+    /// Contents/, where nothing may go: codesign can't seal such an app.
     func resourceBundleDirectory(_ layout: BundleLayout) -> URL {
-        if layout.platform == .macOS && buildSettings.buildSystem == .swiftPM {
-            return layout.root
-        }
-        return layout.resources
+        layout.resources
     }
 }
 
